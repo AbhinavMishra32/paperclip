@@ -3117,6 +3117,26 @@ const PAPERCLIP_SESSION_METADATA_KEYS = new Set([
   SESSION_CONFIG_CATEGORIES_KEY,
   SESSION_CONFIG_CATEGORY_FINGERPRINTS_KEY,
 ]);
+// Adapter session codecs (codex_local, opencode_local, etc.) implement `deserialize()`
+// as a strict per-adapter whitelist (sessionId/cwd/workspaceId/repoUrl/repoRef) and drop
+// every other key, including Paperclip's own config-fingerprint bookkeeping. That made
+// `resolveTaskSessionConfigFreshness` see "fingerprint metadata is missing" on every run
+// and force a full session reset, even when a real prior session existed. Restore the
+// fingerprint keys from the raw (un-decoded) session params after the adapter codec runs.
+function mergePaperclipSessionMetadata(
+  decoded: Record<string, unknown> | null | undefined,
+  raw: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+  if (!raw) return decoded ?? null;
+  const merged: Record<string, unknown> = { ...(decoded ?? {}) };
+  for (const key of PAPERCLIP_SESSION_METADATA_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(raw, key)) {
+      merged[key] = raw[key];
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+
 const WORKSPACE_CONFIG_FINGERPRINT_METADATA_KEY = "configFingerprint";
 const EFFECTIVE_RUN_SESSION_CONFIG_CATEGORIES = [
   "adapter",
@@ -11488,7 +11508,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ? await getTaskSession(agent.companyId, agent.id, agent.adapterType, taskKey)
       : null;
     const taskSessionDecodedParams = normalizeSessionParams(
-      sessionCodec.deserialize(taskSession?.sessionParamsJson ?? null),
+      mergePaperclipSessionMetadata(
+        sessionCodec.deserialize(taskSession?.sessionParamsJson ?? null),
+        parseObject(taskSession?.sessionParamsJson ?? null),
+      ),
     );
     const explicitResumeSessionParams = normalizeResumeParamsForAdapter(
       agent.adapterType,
@@ -12233,7 +12256,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const shouldSwitchIssueToExistingWorkspace =
         issueRef?.executionWorkspacePreference === "reuse_existing" ||
         requestedExecutionWorkspaceMode === "isolated_workspace" ||
-        requestedExecutionWorkspaceMode === "operator_branch";
+        requestedExecutionWorkspaceMode === "operator_branch" ||
+        // `shared_workspace` (project_primary) was never in this list, so an issue's
+        // `executionWorkspacePreference` never flipped from null and every run showed
+        // `workspace.action: "create"` instead of "reuse" — even with an already-durable
+        // project workspace sitting right there. Shared-workspace projects should reuse
+        // their one persisted workspace across runs just as much as isolated ones do.
+        requestedExecutionWorkspaceMode === "shared_workspace";
       const nextIssuePatch: Record<string, unknown> = {};
       if (issueRef?.executionWorkspaceId !== persistedExecutionWorkspace.id) {
         nextIssuePatch.executionWorkspaceId = persistedExecutionWorkspace.id;
