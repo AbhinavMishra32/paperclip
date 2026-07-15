@@ -200,11 +200,11 @@ async function ensureOpenCodeSkillsInjected(
     const target = path.join(skillsHome, entry.runtimeName);
 
     try {
-      const result = await ensurePaperclipSkillSymlink(entry.source, target);
+      const result = await ensureOpenCodeSkillAvailable(entry.source, target);
       if (result === "skipped") continue;
       await onLog(
         "stderr",
-        `[paperclip] ${result === "repaired" ? "Repaired" : "Injected"} OpenCode skill "${entry.key}" into ${skillsHome}\n`,
+        `[paperclip] ${result === "repaired" ? "Repaired" : result === "materialized" ? "Materialized" : "Injected"} OpenCode skill "${entry.key}" into ${skillsHome}\n`,
       );
     } catch (err) {
       await onLog(
@@ -212,6 +212,34 @@ async function ensureOpenCodeSkillsInjected(
         `[paperclip] Failed to inject OpenCode skill "${entry.key}" into ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
+  }
+}
+
+const SKILL_SYMLINK_FALLBACK_CODES = new Set(["EIO", "ENOTSUP", "EOPNOTSUPP", "EPERM"]);
+
+export async function ensureOpenCodeSkillAvailable(
+  source: string,
+  target: string,
+  linkSkill: (source: string, target: string) => Promise<void> = (linkSource, linkTarget) =>
+    fs.symlink(linkSource, linkTarget),
+  copySkill: (source: string, target: string) => Promise<void> = (copySource, copyTarget) =>
+    fs.cp(copySource, copyTarget, { recursive: true, errorOnExist: true, force: false }),
+): Promise<"created" | "repaired" | "skipped" | "materialized"> {
+  try {
+    return await ensurePaperclipSkillSymlink(source, target, linkSkill);
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: unknown }).code ?? "")
+        : "";
+    if (!SKILL_SYMLINK_FALLBACK_CODES.has(code)) throw error;
+
+    // Azure Files and some other network mounts reject symlink creation even
+    // though ordinary directories and files work. Materialize the immutable,
+    // versioned runtime skill instead so OpenCode can still start. Existing
+    // non-symlink directories remain untouched via the normal "skipped" path.
+    await copySkill(source, target);
+    return "materialized";
   }
 }
 

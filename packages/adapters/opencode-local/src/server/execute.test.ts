@@ -1,6 +1,44 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ensureRemoteOpenCodeModelConfiguredAndAvailable } from "./execute.js";
+import {
+  ensureOpenCodeSkillAvailable,
+  ensureRemoteOpenCodeModelConfiguredAndAvailable,
+} from "./execute.js";
+
+describe("ensureOpenCodeSkillAvailable", () => {
+  it("materializes a skill when the runtime filesystem rejects symlinks", async () => {
+    const copied: Array<[string, string]> = [];
+    const linkError = Object.assign(new Error("symlinks unavailable"), { code: "EIO" });
+
+    await expect(
+      ensureOpenCodeSkillAvailable(
+        "/catalog/reflection-coach",
+        "/runtime/skills/reflection-coach",
+        async () => {
+          throw linkError;
+        },
+        async (source, target) => {
+          copied.push([source, target]);
+        },
+      ),
+    ).resolves.toBe("materialized");
+    expect(copied).toEqual([
+      ["/catalog/reflection-coach", "/runtime/skills/reflection-coach"],
+    ]);
+  });
+
+  it("does not hide unrelated symlink failures", async () => {
+    await expect(
+      ensureOpenCodeSkillAvailable(
+        "/catalog/reflection-coach",
+        "/runtime/skills/reflection-coach",
+        async () => {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        },
+      ),
+    ).rejects.toThrow("permission denied");
+  });
+});
 
 describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
   afterEach(() => {
