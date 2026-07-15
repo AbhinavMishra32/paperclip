@@ -1,0 +1,37 @@
+{
+  "name": "@abhinavmishra32/foundry-control-room",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Founder-facing control room for Paperclip companies.",
+  "scripts": {
+    "prebuild": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps",
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "typecheck": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit",
+    "test": "vitest run --config ./vitest.config.ts"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
+  },
+  "keywords": [
+    "paperclip",
+    "founder",
+    "control-room"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.8"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  }
+}
