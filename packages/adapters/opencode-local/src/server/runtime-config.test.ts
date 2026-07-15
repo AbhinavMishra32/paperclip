@@ -171,6 +171,38 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     await prepared.cleanup();
   });
 
+  it("injects short-lived Paperclip MCP gateways into the isolated runtime config", async () => {
+    const configHome = await makeConfigHome({
+      mcp: { existing: { type: "remote", url: "https://existing.example/mcp" } },
+    });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: {},
+      mcpServers: [{
+        name: "Foundry",
+        url: "https://paperclip.example/api/tool-gateway/gateways/gateway-1/mcp",
+        bearerToken: "pcgw_short_lived",
+      }],
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    const runtimeConfig = JSON.parse(
+      await fs.readFile(path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"), "utf8"),
+    ) as { mcp: Record<string, unknown> };
+    expect(runtimeConfig.mcp).toMatchObject({
+      existing: { type: "remote", url: "https://existing.example/mcp" },
+      paperclip_1: {
+        type: "remote",
+        url: "https://paperclip.example/api/tool-gateway/gateways/gateway-1/mcp",
+        enabled: true,
+        oauth: false,
+        headers: { Authorization: "Bearer pcgw_short_lived" },
+      },
+    });
+    expect(prepared.notes).toContain("Injected 1 Paperclip-managed MCP server(s) for this run.");
+    await prepared.cleanup();
+  });
+
   it("ignores malformed PAPERCLIP_OPENCODE_PROVIDERS without writing a provider block and surfaces a note", async () => {
     const configHome = await makeConfigHome({ permission: { read: "allow" } });
     const prepared = await prepareOpenCodeRuntimeConfig({

@@ -46,6 +46,7 @@ import type {
   ExternalObjectMentionConfidence,
   ExternalObjectMentionSourceKind,
   EnvSecretRefBinding,
+  ActivityEvent,
 } from "@paperclipai/shared";
 export type { PluginLauncherRenderContextSnapshot } from "@paperclipai/shared";
 
@@ -71,6 +72,7 @@ import type {
   PluginAuthorizationDecisionResult,
   PluginAuthorizationPolicyRecord,
   PluginAuthorizationPolicySummary,
+  PluginRunActivity,
 } from "./types.js";
 import type {
   PluginHealthDiagnostics,
@@ -1079,6 +1081,20 @@ export interface WorkerToHostMethods {
   ];
 
   // Activity
+  "activity.list": [
+    params: {
+      companyId: string;
+      agentId?: string;
+      entityType?: string;
+      entityId?: string;
+      limit?: number;
+    },
+    result: ActivityEvent[],
+  ];
+  "activity.listRuns": [
+    params: { companyId: string; agentId?: string; limit?: number },
+    result: PluginRunActivity[],
+  ];
   "activity.log": [
     params: {
       companyId: string;

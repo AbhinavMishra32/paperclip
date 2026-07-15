@@ -52,7 +52,7 @@ import {
   requireOpenCodeModelId,
 } from "./models.js";
 import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/server-utils";
-import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
+import { prepareOpenCodeRuntimeConfig, type OpenCodeRuntimeMcpServer } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -75,6 +75,28 @@ function parseModelProvider(model: string | null): string | null {
 
 function resolveOpenCodeBiller(env: Record<string, string>, provider: string | null): string {
   return inferOpenAiCompatibleBiller(env, null) ?? provider ?? "unknown";
+}
+
+function managedMcpGatewaysFromContext(
+  context: Record<string, unknown>,
+  apiBaseUrl: string,
+): OpenCodeRuntimeMcpServer[] {
+  const managedMcp = parseObject(context.paperclipManagedMcp);
+  if (managedMcp.managedMcpOnly !== true) return [];
+  const gateways = Array.isArray(managedMcp.gateways) ? managedMcp.gateways : [];
+  return gateways
+    .map((raw): OpenCodeRuntimeMcpServer | null => {
+      const gateway = parseObject(raw);
+      const name = asString(gateway.name, "").trim();
+      const endpointPath = asString(gateway.endpointPath, "").trim();
+      const bearerToken = asString(gateway.bearerToken, "").trim();
+      if (!name || !endpointPath || !bearerToken) return null;
+      const url = /^https?:\/\//i.test(endpointPath)
+        ? endpointPath
+        : `${apiBaseUrl.replace(/\/+$/, "")}/${endpointPath.replace(/^\/+/, "")}`;
+      return { name, url, bearerToken };
+    })
+    .filter((gateway): gateway is OpenCodeRuntimeMcpServer => Boolean(gateway));
 }
 
 const REMOTE_OPENCODE_MODELS_PROBE_DEFAULT_TIMEOUT_SEC = 20;
@@ -309,7 +331,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
-  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config });
+  const paperclipApiBaseUrl = env.PAPERCLIP_API_URL ?? "";
+  const runtimeMcpServers: OpenCodeRuntimeMcpServer[] = [
+    ...(ctx.runtimeMcp?.getServers() ?? []).map((server) => ({
+      name: server.name,
+      url: server.url,
+      bearerToken: server.token,
+    })),
+    ...managedMcpGatewaysFromContext(context, paperclipApiBaseUrl),
+  ];
+  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
+    env,
+    config,
+    mcpServers: runtimeMcpServers,
+  });
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
   try {

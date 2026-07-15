@@ -69,6 +69,7 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   "goals.list": ["goals.read"],
   "goals.get": ["goals.read"],
   "activity.list": ["activity.read"],
+  "activity.listRuns": ["activity.read"],
   "activity.get": ["activity.read"],
   "costs.list": ["costs.read"],
   "costs.get": ["costs.read"],

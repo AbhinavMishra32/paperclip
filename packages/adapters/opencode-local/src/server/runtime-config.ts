@@ -9,6 +9,12 @@ type PreparedOpenCodeRuntimeConfig = {
   cleanup: () => Promise<void>;
 };
 
+export type OpenCodeRuntimeMcpServer = {
+  name: string;
+  url: string;
+  bearerToken: string;
+};
+
 function resolveXdgConfigHome(env: Record<string, string>): string {
   return (
     (typeof env.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.trim()) ||
@@ -98,9 +104,11 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
   targetIsRemote?: boolean;
+  mcpServers?: OpenCodeRuntimeMcpServer[];
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
-  if (!skipPermissions) {
+  const hasManagedMcp = (input.mcpServers?.length ?? 0) > 0;
+  if (!skipPermissions && !hasManagedMcp) {
     return {
       env: input.env,
       notes: [],
@@ -144,9 +152,12 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   const existingPermission = isPlainObject(existingConfig.permission)
     ? existingConfig.permission
     : {};
-  const notes = [
-    "Injected runtime OpenCode config with permission.external_directory=allow to avoid headless approval prompts.",
-  ];
+  const notes: string[] = [];
+  if (skipPermissions) {
+    notes.push(
+      "Injected runtime OpenCode config with permission.external_directory=allow to avoid headless approval prompts.",
+    );
+  }
 
   // Merge gateway/custom provider definitions supplied via PAPERCLIP_OPENCODE_PROVIDERS
   // (a JSON object in OpenCode's `provider` shape). OpenCode resolves a `--model
@@ -171,13 +182,30 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     );
   }
 
-  const nextConfig: Record<string, unknown> = {
-    ...existingConfig,
-    permission: {
+  const nextConfig: Record<string, unknown> = { ...existingConfig };
+  if (skipPermissions) {
+    nextConfig.permission = {
       ...existingPermission,
       external_directory: "allow",
-    },
-  };
+    };
+  }
+  const existingMcp = isPlainObject(existingConfig.mcp) ? existingConfig.mcp : {};
+  const managedMcp = Object.fromEntries(
+    (input.mcpServers ?? []).map((server, index) => [
+      `paperclip_${index + 1}`,
+      {
+        type: "remote",
+        url: server.url,
+        enabled: true,
+        oauth: false,
+        headers: { Authorization: `Bearer ${server.bearerToken}` },
+      },
+    ]),
+  );
+  if (Object.keys(managedMcp).length > 0) {
+    nextConfig.mcp = { ...existingMcp, ...managedMcp };
+    notes.push(`Injected ${Object.keys(managedMcp).length} Paperclip-managed MCP server(s) for this run.`);
+  }
   if (Object.keys(nextProvider).length > 0) {
     nextConfig.provider = nextProvider;
   }

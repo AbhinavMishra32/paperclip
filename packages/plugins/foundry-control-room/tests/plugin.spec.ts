@@ -12,11 +12,16 @@ describe("Foundry Control Room", () => {
     }));
   });
 
-  it("reports its actual worker status through the plugin bridge", async () => {
+  it("registers real company data and agent tools", async () => {
     const harness = createTestHarness({ manifest, capabilities: manifest.capabilities });
     await plugin.definition.setup(harness.ctx);
-    const status = await harness.getData<{ status: string; checkedAt: string }>("control-room-status");
-    expect(status.status).toBe("ready");
-    expect(Date.parse(status.checkedAt)).toBeTruthy();
+    expect(manifest.tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining([
+      "get_company_context",
+      "get_integration_status",
+      "create_stripe_payment_link",
+      "provision_vercel_secret",
+    ]));
+    expect(manifest.capabilities).toContain("activity.read");
+    expect(manifest.capabilities).toContain("agent.tools.register");
   });
 });

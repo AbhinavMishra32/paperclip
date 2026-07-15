@@ -47,6 +47,7 @@ import type {
   PrincipalPermissionGrant,
   PrincipalType,
   EnvSecretRefBinding,
+  ActivityEvent,
 } from "@paperclipai/shared";
 import type { PluginPerformActionContext } from "./protocol.js";
 
@@ -83,6 +84,7 @@ export type {
   PluginLauncherRenderDeclaration,
   PluginLauncherDeclaration,
   PluginMinimumHostVersion,
+  ActivityEvent,
   PluginDatabaseDeclaration,
   PluginApiRouteDeclaration,
   PluginApiRouteCompanyResolution,
@@ -695,6 +697,22 @@ export interface PluginActivityLogEntry {
  * @see PLUGIN_SPEC.md §21.4 — Activity Log Changes
  */
 export interface PluginActivityClient {
+  /** List company-scoped audit activity. Requires `activity.read`. */
+  list(input: {
+    companyId: string;
+    agentId?: string;
+    entityType?: string;
+    entityId?: string;
+    limit?: number;
+  }): Promise<ActivityEvent[]>;
+
+  /** List recent run summaries for every agent in a company. Requires `activity.read`. */
+  listRuns(input: {
+    companyId: string;
+    agentId?: string;
+    limit?: number;
+  }): Promise<PluginRunActivity[]>;
+
   /**
    * Write an activity log entry attributed to this plugin.
    *
@@ -704,6 +722,21 @@ export interface PluginActivityClient {
    * @param entry - The activity log entry to write
    */
   log(entry: PluginActivityLogEntry): Promise<void>;
+}
+
+export interface PluginRunActivity {
+  id: string;
+  companyId: string;
+  agentId: string;
+  status: string;
+  invocationSource: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  errorCode: string | null;
+  stdoutExcerpt: string | null;
+  stderrExcerpt: string | null;
+  logBytes: number | null;
 }
 
 /**

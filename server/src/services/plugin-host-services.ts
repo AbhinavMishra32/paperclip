@@ -26,7 +26,7 @@ import type {
   PluginIssueOrchestrationSummary,
   PluginExecutionWorkspaceMetadata,
 } from "@paperclipai/plugin-sdk";
-import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
+import type { ActivityEvent, CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
@@ -1245,6 +1245,50 @@ export function buildHostServices(
     },
 
     activity: {
+      async list(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const conditions = [eq(activityLog.companyId, companyId)];
+        if (params.agentId) conditions.push(eq(activityLog.agentId, params.agentId));
+        if (params.entityType) conditions.push(eq(activityLog.entityType, params.entityType));
+        if (params.entityId) conditions.push(eq(activityLog.entityId, params.entityId));
+        const limit = Math.max(1, Math.min(200, params.limit ?? 80));
+        const rows = await db.select().from(activityLog)
+          .where(and(...conditions))
+          .orderBy(desc(activityLog.createdAt))
+          .limit(limit);
+        return rows as ActivityEvent[];
+      },
+      async listRuns(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const conditions = [eq(heartbeatRuns.companyId, companyId)];
+        if (params.agentId) conditions.push(eq(heartbeatRuns.agentId, params.agentId));
+        const limit = Math.max(1, Math.min(200, params.limit ?? 80));
+        const rows = await db.select({
+          id: heartbeatRuns.id,
+          companyId: heartbeatRuns.companyId,
+          agentId: heartbeatRuns.agentId,
+          status: heartbeatRuns.status,
+          invocationSource: heartbeatRuns.invocationSource,
+          startedAt: heartbeatRuns.startedAt,
+          finishedAt: heartbeatRuns.finishedAt,
+          createdAt: heartbeatRuns.createdAt,
+          errorCode: heartbeatRuns.errorCode,
+          stdoutExcerpt: heartbeatRuns.stdoutExcerpt,
+          stderrExcerpt: heartbeatRuns.stderrExcerpt,
+          logBytes: heartbeatRuns.logBytes,
+        }).from(heartbeatRuns)
+          .where(and(...conditions))
+          .orderBy(desc(heartbeatRuns.createdAt))
+          .limit(limit);
+        return rows.map((row) => ({
+          ...row,
+          startedAt: row.startedAt?.toISOString() ?? null,
+          finishedAt: row.finishedAt?.toISOString() ?? null,
+          createdAt: row.createdAt.toISOString(),
+        }));
+      },
       async log(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);

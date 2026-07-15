@@ -156,8 +156,10 @@ export interface HostServices {
     ): Promise<string>;
   };
 
-  /** Provides `activity.log`. */
+  /** Provides company-scoped activity reads and `activity.log`. */
   activity: {
+    list(params: WorkerToHostMethods["activity.list"][0]): Promise<WorkerToHostMethods["activity.list"][1]>;
+    listRuns(params: WorkerToHostMethods["activity.listRuns"][0]): Promise<WorkerToHostMethods["activity.listRuns"][1]>;
     log(params: {
       companyId: string;
       message: string;
@@ -394,6 +396,8 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "secrets.resolve": "secrets.read-ref",
 
   // Activity
+  "activity.list": "activity.read",
+  "activity.listRuns": "activity.read",
   "activity.log": "activity.log.write",
 
   // Metrics
@@ -749,6 +753,12 @@ export function createHostClientHandlers(
     }),
 
     // Activity
+    "activity.list": gated("activity.list", async (params) => {
+      return services.activity.list(params);
+    }),
+    "activity.listRuns": gated("activity.listRuns", async (params) => {
+      return services.activity.listRuns(params);
+    }),
     "activity.log": gated("activity.log", async (params) => {
       return services.activity.log(params);
     }),

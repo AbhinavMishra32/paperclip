@@ -583,6 +583,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       },
 
       activity: {
+        async list(input) {
+          return callHost("activity.list", input);
+        },
+        async listRuns(input) {
+          return callHost("activity.listRuns", input);
+        },
         async log(entry): Promise<void> {
           await callHost("activity.log", {
             companyId: entry.companyId,

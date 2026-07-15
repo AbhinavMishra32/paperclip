@@ -228,6 +228,7 @@ export type {
   PluginSecretsClient,
   PluginActivityClient,
   PluginActivityLogEntry,
+  PluginRunActivity,
   PluginStateClient,
   PluginEntitiesClient,
   PluginProjectsClient,

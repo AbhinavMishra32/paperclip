@@ -881,6 +881,14 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
     },
     activity: {
+      async list() {
+        requireCapability(manifest, capabilitySet, "activity.read");
+        return [];
+      },
+      async listRuns() {
+        requireCapability(manifest, capabilitySet, "activity.read");
+        return [];
+      },
       async log(entry) {
         requireCapability(manifest, capabilitySet, "activity.log.write");
         activity.push(entry);
