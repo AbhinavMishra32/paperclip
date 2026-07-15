@@ -10,7 +10,7 @@ export const TOOL_NAMES = {
 const manifest: PaperclipPluginManifestV1 = {
   id: "foundry.control-room",
   apiVersion: 1,
-  version: "0.2.0",
+  version: "0.2.1",
   displayName: "Foundry",
   description: "Founder-facing company control room and secure business tools.",
   author: "Abhinav Mishra",

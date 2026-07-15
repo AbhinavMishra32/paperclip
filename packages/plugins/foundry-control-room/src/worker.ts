@@ -77,7 +77,9 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
   );
 
   const agentNames = Object.fromEntries(agents.map((agent) => [agent.id, agent.name]));
-  const ceo = agents.find((agent) => agent.role === "ceo") ?? null;
+  const ceo = agents.find((agent) => agent.role === "ceo")
+    ?? agents.find((agent) => agent.name.trim().toLowerCase() === "ceo")
+    ?? null;
   const activeStatuses = new Set(["backlog", "todo", "in_progress", "in_review", "blocked"]);
   const completeStatuses = new Set(["done", "cancelled"]);
   const activeIssues = issues.filter((issue) => activeStatuses.has(issue.status));
@@ -229,7 +231,8 @@ const plugin = definePlugin({
     ctx.actions.register("invoke-ceo", async (params) => {
       const companyId = companyIdFrom(params);
       const agents = await ctx.agents.list({ companyId, limit: 200, offset: 0 });
-      const ceo = agents.find((agent) => agent.role === "ceo");
+      const ceo = agents.find((agent) => agent.role === "ceo")
+        ?? agents.find((agent) => agent.name.trim().toLowerCase() === "ceo");
       if (!ceo) throw new Error("No CEO agent is configured");
       const result = await ctx.agents.invoke(ceo.id, companyId, {
         reason: "foundry_manual_run",
@@ -243,7 +246,8 @@ const plugin = definePlugin({
       const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
       if (!prompt) throw new Error("prompt is required");
       const agents = await ctx.agents.list({ companyId, limit: 200, offset: 0 });
-      const ceo = agents.find((agent) => agent.role === "ceo");
+      const ceo = agents.find((agent) => agent.role === "ceo")
+        ?? agents.find((agent) => agent.name.trim().toLowerCase() === "ceo");
       if (!ceo) throw new Error("No CEO agent is configured");
       const existing = await ctx.agents.sessions.list(ceo.id, companyId);
       const session = existing[0] ?? await ctx.agents.sessions.create(ceo.id, companyId, { reason: "foundry_founder_chat" });
