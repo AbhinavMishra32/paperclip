@@ -6,6 +6,7 @@ import {
   budgetIncidents,
   costEvents,
   heartbeatRuns,
+  heartbeatRunEvents,
   invites,
   issues as issuesTable,
   pluginLogs,
@@ -1288,6 +1289,30 @@ export function buildHostServices(
           finishedAt: row.finishedAt?.toISOString() ?? null,
           createdAt: row.createdAt.toISOString(),
         }));
+      },
+      async listRunEvents(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const conditions = [eq(heartbeatRunEvents.companyId, companyId)];
+        if (params.runId) conditions.push(eq(heartbeatRunEvents.runId, params.runId));
+        if (params.agentId) conditions.push(eq(heartbeatRunEvents.agentId, params.agentId));
+        const limit = Math.max(1, Math.min(500, params.limit ?? 200));
+        const rows = await db.select({
+          id: heartbeatRunEvents.id,
+          companyId: heartbeatRunEvents.companyId,
+          runId: heartbeatRunEvents.runId,
+          agentId: heartbeatRunEvents.agentId,
+          seq: heartbeatRunEvents.seq,
+          eventType: heartbeatRunEvents.eventType,
+          stream: heartbeatRunEvents.stream,
+          level: heartbeatRunEvents.level,
+          message: heartbeatRunEvents.message,
+          createdAt: heartbeatRunEvents.createdAt,
+        }).from(heartbeatRunEvents)
+          .where(and(...conditions))
+          .orderBy(desc(heartbeatRunEvents.createdAt))
+          .limit(limit);
+        return rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() }));
       },
       async log(params) {
         const companyId = ensureCompanyId(params.companyId);

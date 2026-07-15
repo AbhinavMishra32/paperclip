@@ -713,6 +713,14 @@ export interface PluginActivityClient {
     limit?: number;
   }): Promise<PluginRunActivity[]>;
 
+  /** List persisted live events emitted by recent agent runs. Requires `activity.read`. */
+  listRunEvents(input: {
+    companyId: string;
+    runId?: string;
+    agentId?: string;
+    limit?: number;
+  }): Promise<PluginRunEvent[]>;
+
   /**
    * Write an activity log entry attributed to this plugin.
    *
@@ -737,6 +745,19 @@ export interface PluginRunActivity {
   stdoutExcerpt: string | null;
   stderrExcerpt: string | null;
   logBytes: number | null;
+}
+
+export interface PluginRunEvent {
+  id: number;
+  companyId: string;
+  runId: string;
+  agentId: string;
+  seq: number;
+  eventType: string;
+  stream: string | null;
+  level: string | null;
+  message: string | null;
+  createdAt: string;
 }
 
 /**

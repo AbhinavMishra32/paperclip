@@ -73,6 +73,7 @@ import type {
   PluginAuthorizationPolicyRecord,
   PluginAuthorizationPolicySummary,
   PluginRunActivity,
+  PluginRunEvent,
 } from "./types.js";
 import type {
   PluginHealthDiagnostics,
@@ -1094,6 +1095,10 @@ export interface WorkerToHostMethods {
   "activity.listRuns": [
     params: { companyId: string; agentId?: string; limit?: number },
     result: PluginRunActivity[],
+  ];
+  "activity.listRunEvents": [
+    params: { companyId: string; runId?: string; agentId?: string; limit?: number },
+    result: PluginRunEvent[],
   ];
   "activity.log": [
     params: {

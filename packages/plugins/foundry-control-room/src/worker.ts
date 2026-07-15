@@ -45,7 +45,7 @@ function integrationStatus(config: FoundryConfig) {
 }
 
 async function companySnapshot(ctx: PluginContext, companyId: string) {
-  const [company, agents, issues, projects, goals, activity, runs, config] = await Promise.all([
+  const [company, agents, issues, projects, goals, activity, runs, runEvents, config] = await Promise.all([
     ctx.companies.get(companyId),
     ctx.agents.list({ companyId, limit: 200, offset: 0 }),
     ctx.issues.list({ companyId, limit: 200, offset: 0 }),
@@ -53,6 +53,7 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
     ctx.goals.list({ companyId, limit: 200, offset: 0 }),
     ctx.activity.list({ companyId, limit: 80 }),
     ctx.activity.listRuns({ companyId, limit: 80 }),
+    ctx.activity.listRunEvents({ companyId, limit: 250 }),
     getConfig(ctx, companyId),
   ]);
   if (!company) throw new Error("Company not found");
@@ -107,6 +108,7 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
     goals,
     activity,
     runs,
+    runEvents,
     workspaces,
     documents: documentCounts.flatMap((entry) => entry.documents.map((document) => ({ ...document, issueId: entry.issueId, issueIdentifier: entry.issueIdentifier, issueTitle: entry.issueTitle }))),
     integrations: integrationStatus(config),
