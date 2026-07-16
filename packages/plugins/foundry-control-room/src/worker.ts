@@ -416,18 +416,33 @@ async function deployWithVercelCli(
     VERCEL_PROJECT_ID: config.vercelProjectId,
   };
   if (config.vercelTeamId) env.VERCEL_ORG_ID = config.vercelTeamId;
+  const deploymentsBefore = await vercelDeployments(ctx, companyId, config, 20);
+  const deploymentIdsBefore = new Set(deploymentsBefore.map((deployment) => deployment.id));
   const result = await execFileAsync(
     "npx",
     ["--yes", "vercel@56.2.1", "deploy", "--prod", "--yes", "--non-interactive", "--no-wait", "--archive=tgz"],
     { cwd: workspacePath, env, timeout: 15 * 60_000, maxBuffer: 4_000_000 },
   );
-  const deploymentUrl = result.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .reverse()
-    .find((line) => /^https:\/\/[A-Za-z0-9.-]+$/.test(line));
-  if (!deploymentUrl) throw new Error("Vercel CLI completed without returning a deployment URL");
-  return deploymentUrl;
+  const deploymentUrl = `${result.stdout}\n${result.stderr}`
+    .match(/https:\/\/[A-Za-z0-9.-]+/g)
+    ?.reverse()
+    .find((url) => /\.vercel\.app$/i.test(url));
+  if (deploymentUrl) return deploymentUrl;
+
+  // With --no-wait, some Vercel CLI versions accept the deployment without
+  // printing its URL. Treat Vercel's API as authoritative instead of telling
+  // the agent that a deployment which actually started has failed.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const deployments = await vercelDeployments(ctx, companyId, config, 20);
+    const created = deployments.find((deployment) =>
+      !deploymentIdsBefore.has(deployment.id) &&
+      deployment.target === "production" &&
+      typeof deployment.url === "string"
+    );
+    if (created?.url) return created.url;
+    if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error("Vercel accepted the deploy command, but no new production deployment could be identified");
 }
 
 async function provisionVercelEnv(
