@@ -1,6 +1,6 @@
 {
   "name": "@abhinavmishra32/foundry-control-room",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "Founder-facing control room for Paperclip companies.",
@@ -23,10 +23,12 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@paperclipai/plugin-sdk": "workspace:*"
+    "@paperclipai/plugin-sdk": "workspace:*",
+    "nodemailer": "^7.0.9"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",
+    "@types/nodemailer": "^7.0.2",
     "@types/react": "^19.2.17",
     "esbuild": "^0.28.1",
     "typescript": "^5.7.3",

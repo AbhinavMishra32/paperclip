@@ -9,7 +9,8 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { TOOL_NAMES } from "./manifest.js";
+import nodemailer from "nodemailer";
+import manifest, { FOUNDRY_SKILLS, TOOL_NAMES } from "./manifest.js";
 
 const execFileAsync = promisify(execFile);
 const LAGUNA_MODEL = "poolside/laguna-xs-2.1:free";
@@ -22,7 +23,7 @@ const ROLE_TOOL_NAMES: Record<string, string[]> = {
   "engineering-manager": [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionDatabase, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents, TOOL_NAMES.deployProject],
   cto: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionDatabase, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents, TOOL_NAMES.deployProject],
   qa: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents],
-  growth: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.listDeployments, TOOL_NAMES.publishBlog],
+  growth: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.listDeployments, TOOL_NAMES.publishBlog, TOOL_NAMES.recordLeads, TOOL_NAMES.sendOutboundEmail],
 };
 
 type FoundryConfig = {
@@ -34,6 +35,44 @@ type FoundryConfig = {
   openrouterApiKey?: string | EnvSecretRefBinding;
   databaseUrl?: string | EnvSecretRefBinding;
   authSecret?: string | EnvSecretRefBinding;
+  smtpMode?: "platform" | "custom";
+  customSmtpHost?: string;
+  customSmtpPort?: string;
+  customSmtpUser?: string;
+  customSmtpPassword?: string | EnvSecretRefBinding;
+  customSmtpFromEmail?: string;
+  customSmtpFromName?: string;
+};
+
+type Lead = {
+  id: string;
+  companyId: string;
+  foundByAgentId: string | null;
+  name: string;
+  title: string | null;
+  companyName: string | null;
+  email: string;
+  sourceUrl: string;
+  notes: string | null;
+  status: "new" | "contacted" | "replied" | "bounced" | "unsubscribed" | "do_not_contact";
+  createdAt: string;
+  updatedAt: string;
+};
+
+type OutboundEmail = {
+  id: string;
+  companyId: string;
+  leadId: string;
+  agentId: string | null;
+  subject: string;
+  body: string;
+  fromEmail: string;
+  toEmail: string;
+  status: "sent" | "failed";
+  smtpMode: "platform" | "custom";
+  providerMessageId: string | null;
+  error: string | null;
+  createdAt: string;
 };
 
 type ToolEvent = { id: string; agentId: string | null; runId: string | null; toolName: string; status: string; summary: string | null; error: string | null; metadata: Record<string, unknown>; createdAt: string; updatedAt: string };
@@ -59,6 +98,34 @@ function chatTable(ctx: PluginContext) {
 
 function toolEventTable(ctx: PluginContext) {
   return `${ctx.db.namespace}.tool_events`;
+}
+
+function leadsTable(ctx: PluginContext) {
+  return `${ctx.db.namespace}.leads`;
+}
+
+function outboundEmailsTable(ctx: PluginContext) {
+  return `${ctx.db.namespace}.outbound_emails`;
+}
+
+async function listLeads(ctx: PluginContext, companyId: string): Promise<Lead[]> {
+  return await ctx.db.query<Lead>(
+    `SELECT id, company_id AS "companyId", found_by_agent_id AS "foundByAgentId", name, title,
+            company_name AS "companyName", email, source_url AS "sourceUrl", notes, status,
+            created_at::text AS "createdAt", updated_at::text AS "updatedAt"
+       FROM ${leadsTable(ctx)} WHERE company_id = $1 ORDER BY created_at DESC LIMIT 200`,
+    [companyId],
+  );
+}
+
+async function listOutboundEmails(ctx: PluginContext, companyId: string): Promise<OutboundEmail[]> {
+  return await ctx.db.query<OutboundEmail>(
+    `SELECT id, company_id AS "companyId", lead_id AS "leadId", agent_id AS "agentId", subject, body,
+            from_email AS "fromEmail", to_email AS "toEmail", status, smtp_mode AS "smtpMode",
+            provider_message_id AS "providerMessageId", error, created_at::text AS "createdAt"
+       FROM ${outboundEmailsTable(ctx)} WHERE company_id = $1 ORDER BY created_at DESC LIMIT 200`,
+    [companyId],
+  );
 }
 
 async function listToolEvents(ctx: PluginContext, companyId: string): Promise<ToolEvent[]> {
@@ -198,8 +265,15 @@ function isSecretRef(value: unknown): value is EnvSecretRefBinding {
 
 async function getConfig(ctx: PluginContext, companyId: string): Promise<FoundryConfig> {
   const global = await ctx.config.get(companyId) as FoundryConfig;
-  const rows = await ctx.db.query<{ websiteUrl: string | null; vercelProjectId: string | null; vercelTeamId: string | null }>(
-    `SELECT website_url AS "websiteUrl", vercel_project_id AS "vercelProjectId", vercel_team_id AS "vercelTeamId"
+  const rows = await ctx.db.query<{
+    websiteUrl: string | null; vercelProjectId: string | null; vercelTeamId: string | null;
+    smtpMode: "platform" | "custom" | null; customSmtpHost: string | null; customSmtpPort: string | null;
+    customSmtpUser: string | null; customSmtpFromEmail: string | null; customSmtpFromName: string | null;
+  }>(
+    `SELECT website_url AS "websiteUrl", vercel_project_id AS "vercelProjectId", vercel_team_id AS "vercelTeamId",
+            smtp_mode AS "smtpMode", custom_smtp_host AS "customSmtpHost", custom_smtp_port AS "customSmtpPort",
+            custom_smtp_user AS "customSmtpUser", custom_smtp_from_email AS "customSmtpFromEmail",
+            custom_smtp_from_name AS "customSmtpFromName"
        FROM ${ctx.db.namespace}.company_integrations WHERE company_id = $1 LIMIT 1`,
     [companyId],
   );
@@ -209,6 +283,14 @@ async function getConfig(ctx: PluginContext, companyId: string): Promise<Foundry
     websiteUrl: local?.websiteUrl || global.websiteUrl,
     vercelProjectId: local?.vercelProjectId || global.vercelProjectId,
     vercelTeamId: local?.vercelTeamId || global.vercelTeamId,
+    smtpMode: local?.smtpMode ?? global.smtpMode,
+    customSmtpHost: local?.customSmtpHost || global.customSmtpHost,
+    customSmtpPort: local?.customSmtpPort || global.customSmtpPort,
+    customSmtpUser: local?.customSmtpUser || global.customSmtpUser,
+    customSmtpFromEmail: local?.customSmtpFromEmail || global.customSmtpFromEmail,
+    customSmtpFromName: local?.customSmtpFromName || global.customSmtpFromName,
+    // customSmtpPassword is a secret ref and only ever comes from the native per-company plugin config.
+    customSmtpPassword: global.customSmtpPassword,
   };
 }
 
@@ -227,6 +309,51 @@ function optionalId(value: unknown, label: string) {
   return text;
 }
 
+function platformSmtpConfigured() {
+  return Boolean(
+    process.env.FOUNDRY_DEFAULT_SMTP_HOST
+    && process.env.FOUNDRY_DEFAULT_SMTP_USER
+    && process.env.FOUNDRY_DEFAULT_SMTP_PASSWORD
+    && process.env.FOUNDRY_DEFAULT_SMTP_FROM,
+  );
+}
+
+function customSmtpConfigured(config: FoundryConfig) {
+  return Boolean(
+    config.customSmtpHost?.trim()
+    && config.customSmtpUser?.trim()
+    && isSecretRef(config.customSmtpPassword)
+    && config.customSmtpFromEmail?.trim(),
+  );
+}
+
+function smtpConfigured(config: FoundryConfig) {
+  return config.smtpMode === "custom" ? customSmtpConfigured(config) : platformSmtpConfigured();
+}
+
+async function resolveSmtpSender(ctx: PluginContext, companyId: string, config: FoundryConfig) {
+  const mode: "platform" | "custom" = config.smtpMode === "custom" ? "custom" : "platform";
+  if (mode === "custom") {
+    if (!customSmtpConfigured(config)) throw new Error("Custom SMTP is selected but not fully configured in Foundry settings");
+    const password = await ctx.secrets.resolve(config.customSmtpPassword as EnvSecretRefBinding, { companyId, configPath: "customSmtpPassword" });
+    const port = Number(config.customSmtpPort) || 587;
+    const transport = nodemailer.createTransport({
+      host: config.customSmtpHost, port, secure: port === 465,
+      auth: { user: config.customSmtpUser, pass: password },
+    });
+    const fromName = config.customSmtpFromName?.trim();
+    const from = fromName ? `${fromName} <${config.customSmtpFromEmail}>` : String(config.customSmtpFromEmail);
+    return { transport, from, mode };
+  }
+  if (!platformSmtpConfigured()) throw new Error("Outbound email is not configured. Configure a custom SMTP connection in Foundry settings, or ask the operator to enable the shared connection.");
+  const port = Number(process.env.FOUNDRY_DEFAULT_SMTP_PORT) || 587;
+  const transport = nodemailer.createTransport({
+    host: process.env.FOUNDRY_DEFAULT_SMTP_HOST, port, secure: port === 465,
+    auth: { user: process.env.FOUNDRY_DEFAULT_SMTP_USER, pass: process.env.FOUNDRY_DEFAULT_SMTP_PASSWORD },
+  });
+  return { transport, from: String(process.env.FOUNDRY_DEFAULT_SMTP_FROM), mode };
+}
+
 function integrationStatus(config: FoundryConfig) {
   return {
     website: { configured: Boolean(config.websiteUrl), url: config.websiteUrl || null },
@@ -236,15 +363,60 @@ function integrationStatus(config: FoundryConfig) {
       projectConfigured: Boolean(config.vercelProjectId),
     },
     analytics: { configured: false },
-    email: { configured: false },
+    email: { configured: smtpConfigured(config), mode: config.smtpMode === "custom" ? "custom" : "platform" },
     openrouter: { configured: isSecretRef(config.openrouterApiKey), model: LAGUNA_MODEL },
     database: { configured: isSecretRef(config.databaseUrl) },
     auth: { configured: isSecretRef(config.authSecret) },
   };
 }
 
+function cronFieldMatches(field: string, value: number) {
+  if (field === "*") return true;
+  return field.split(",").some((part) => Number(part) === value);
+}
+
+function nextCronRun(cronExpression: string, from: Date): Date | null {
+  const parts = cronExpression.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minute, hour, dom, month, dow] = parts;
+  const candidate = new Date(from.getTime());
+  candidate.setUTCSeconds(0, 0);
+  candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+  for (let i = 0; i < 527_040; i += 1) {
+    const matches = cronFieldMatches(minute, candidate.getUTCMinutes())
+      && cronFieldMatches(hour, candidate.getUTCHours())
+      && cronFieldMatches(dom, candidate.getUTCDate())
+      && cronFieldMatches(month, candidate.getUTCMonth() + 1)
+      && cronFieldMatches(dow, candidate.getUTCDay());
+    if (matches) return candidate;
+    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+  }
+  return null;
+}
+
+function routineSummaries(issues: Array<{ originId?: string | null; createdAt: Date | string; status: string; identifier: string | null }>) {
+  return (manifest.routines ?? []).map((routine) => {
+    const originId = routine.issueTemplate?.originId ?? `routine:${routine.routineKey}`;
+    const cronExpression = routine.triggers?.find((trigger) => trigger.kind === "schedule")?.cronExpression ?? null;
+    const matches = issues
+      .filter((issue) => issue.originId === originId)
+      .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
+    const last = matches[0] ?? null;
+    const now = new Date();
+    return {
+      key: routine.routineKey,
+      title: routine.title,
+      cronExpression,
+      nextRunAt: cronExpression ? nextCronRun(cronExpression, now)?.toISOString() ?? null : null,
+      lastRunAt: last ? new Date(last.createdAt).toISOString() : null,
+      lastRunStatus: last?.status ?? null,
+      lastRunIssueIdentifier: last?.identifier ?? null,
+    };
+  });
+}
+
 async function companySnapshot(ctx: PluginContext, companyId: string) {
-  const [company, agents, issues, projects, goals, activity, runs, runEvents, config, toolEvents] = await Promise.all([
+  const [company, agents, issues, projects, goals, activity, runs, runEvents, config, toolEvents, leads, outboundEmails] = await Promise.all([
     ctx.companies.get(companyId),
     ctx.agents.list({ companyId, limit: 200, offset: 0 }),
     ctx.issues.list({ companyId, limit: 200, offset: 0 }),
@@ -255,6 +427,8 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
     ctx.activity.listRunEvents({ companyId, limit: 250 }),
     getConfig(ctx, companyId),
     listToolEvents(ctx, companyId),
+    listLeads(ctx, companyId),
+    listOutboundEmails(ctx, companyId),
   ]);
   if (!company) throw new Error("Company not found");
 
@@ -313,12 +487,21 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
     chatMessages,
     toolEvents,
     workspaces,
+    leads,
+    outboundEmails,
+    routines: routineSummaries(issues),
     documents: documentCounts.flatMap((entry) => entry.documents.map((document) => ({ ...document, issueId: entry.issueId, issueIdentifier: entry.issueIdentifier, issueTitle: entry.issueTitle }))),
     integrations: integrationStatus(config),
     integrationSettings: {
       websiteUrl: config.websiteUrl ?? "",
       vercelProjectId: config.vercelProjectId ?? "",
       vercelTeamId: config.vercelTeamId ?? "",
+      smtpMode: config.smtpMode === "custom" ? "custom" : "platform",
+      customSmtpHost: config.customSmtpHost ?? "",
+      customSmtpPort: config.customSmtpPort ?? "",
+      customSmtpUser: config.customSmtpUser ?? "",
+      customSmtpFromEmail: config.customSmtpFromEmail ?? "",
+      customSmtpFromName: config.customSmtpFromName ?? "",
     },
     counts: {
       activeIssues: activeIssues.length,
@@ -845,6 +1028,126 @@ function registerTools(ctx: PluginContext) {
       return await finishToolEvent(ctx, eventId, { content: `Published ${title} in content/blog/${slug}.md at commit ${sha}.${deployment ? ` Deployment ${String(deployment.id)} is ${String(deployment.state)}.` : " Deployment discovery is pending."}`, data: { title, slug, filePath: `content/blog/${slug}.md`, sha, branch, deployment } }, { title, slug, sha, branch, deployment });
     } catch (error) { return await failToolEvent(ctx, eventId, error); }
   });
+
+  ctx.tools.register(TOOL_NAMES.recordLeads, {
+    displayName: "Record found leads",
+    description: "Store real, sourced prospective-customer leads. Deduplicates by email.",
+    parametersSchema: {
+      type: "object",
+      properties: { leads: { type: "array", items: { type: "object" } } },
+      required: ["leads"],
+    },
+  }, async (raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.recordLeads);
+    try {
+      const input = (raw as { leads?: unknown }).leads;
+      if (!Array.isArray(input) || input.length === 0) {
+        return await finishToolEvent(ctx, eventId, { error: "leads must be a non-empty array" });
+      }
+      const emailPattern = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+      const existing = await listLeads(ctx, runCtx.companyId);
+      const existingEmails = new Set(existing.map((lead) => lead.email.toLowerCase()));
+      const created: Lead[] = [];
+      const rejected: Array<{ email: unknown; reason: string }> = [];
+      const seenThisCall = new Set<string>();
+      for (const entry of input) {
+        const candidate = entry as { name?: unknown; title?: unknown; companyName?: unknown; email?: unknown; sourceUrl?: unknown; notes?: unknown };
+        const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+        const email = typeof candidate.email === "string" ? candidate.email.trim().toLowerCase() : "";
+        const sourceUrl = typeof candidate.sourceUrl === "string" ? candidate.sourceUrl.trim() : "";
+        if (!name || !emailPattern.test(email) || !/^https?:\/\//.test(sourceUrl)) {
+          rejected.push({ email: candidate.email, reason: "missing or invalid name, email, or sourceUrl" });
+          continue;
+        }
+        if (existingEmails.has(email) || seenThisCall.has(email)) {
+          rejected.push({ email, reason: "duplicate of an existing lead" });
+          continue;
+        }
+        seenThisCall.add(email);
+        const id = crypto.randomUUID();
+        await ctx.db.execute(
+          `INSERT INTO ${leadsTable(ctx)} (id, company_id, found_by_agent_id, name, title, company_name, email, source_url, notes, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'new')`,
+          [id, runCtx.companyId, runCtx.agentId, name,
+            typeof candidate.title === "string" ? candidate.title.trim() || null : null,
+            typeof candidate.companyName === "string" ? candidate.companyName.trim() || null : null,
+            email, sourceUrl,
+            typeof candidate.notes === "string" ? candidate.notes.trim().slice(0, 500) || null : null],
+        );
+        created.push({
+          id, companyId: runCtx.companyId, foundByAgentId: runCtx.agentId, name,
+          title: typeof candidate.title === "string" ? candidate.title : null,
+          companyName: typeof candidate.companyName === "string" ? candidate.companyName : null,
+          email, sourceUrl, notes: typeof candidate.notes === "string" ? candidate.notes : null,
+          status: "new", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        });
+      }
+      await ctx.activity.log({ companyId: runCtx.companyId, message: `Recorded ${created.length} new lead(s)`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, createdCount: created.length, rejectedCount: rejected.length } });
+      return await finishToolEvent(ctx, eventId, {
+        content: `Recorded ${created.length} new lead(s). ${rejected.length} candidate(s) were rejected or duplicates.`,
+        data: { created, rejected },
+      }, { createdCount: created.length, rejectedCount: rejected.length });
+    } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
+
+  ctx.tools.register(TOOL_NAMES.sendOutboundEmail, {
+    displayName: "Send outbound email",
+    description: "Send a real first-contact email to a recorded lead through the configured SMTP connection.",
+    parametersSchema: {
+      type: "object",
+      properties: { leadId: { type: "string" }, subject: { type: "string" }, body: { type: "string" } },
+      required: ["leadId", "subject", "body"],
+    },
+  }, async (raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.sendOutboundEmail);
+    try {
+      const input = raw as { leadId?: string; subject?: string; body?: string };
+      const leadId = input.leadId?.trim() ?? "";
+      const subject = input.subject?.trim() ?? "";
+      const body = input.body?.trim() ?? "";
+      if (!leadId || subject.length < 3 || body.length < 20) {
+        return await finishToolEvent(ctx, eventId, { error: "leadId, subject (3+ chars), and body (20+ chars) are required" });
+      }
+      const [lead] = await ctx.db.query<Lead>(
+        `SELECT id, company_id AS "companyId", found_by_agent_id AS "foundByAgentId", name, title,
+                company_name AS "companyName", email, source_url AS "sourceUrl", notes, status,
+                created_at::text AS "createdAt", updated_at::text AS "updatedAt"
+           FROM ${leadsTable(ctx)} WHERE id = $1 AND company_id = $2 LIMIT 1`,
+        [leadId, runCtx.companyId],
+      );
+      if (!lead) return await finishToolEvent(ctx, eventId, { error: "Lead not found for this company" });
+      if (lead.status !== "new") return await finishToolEvent(ctx, eventId, { error: `Refusing to send: lead status is '${lead.status}', not 'new'` });
+
+      const config = await getConfig(ctx, runCtx.companyId);
+      let sender: Awaited<ReturnType<typeof resolveSmtpSender>>;
+      try {
+        sender = await resolveSmtpSender(ctx, runCtx.companyId, config);
+      } catch (error) {
+        return await finishToolEvent(ctx, eventId, { error: error instanceof Error ? error.message : String(error) });
+      }
+
+      const emailId = crypto.randomUUID();
+      try {
+        const info = await sender.transport.sendMail({ from: sender.from, to: lead.email, subject, text: body });
+        await ctx.db.execute(
+          `INSERT INTO ${outboundEmailsTable(ctx)} (id, company_id, lead_id, agent_id, subject, body, from_email, to_email, status, smtp_mode, provider_message_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sent',$9,$10)`,
+          [emailId, runCtx.companyId, lead.id, runCtx.agentId, subject, body, sender.from, lead.email, sender.mode, info.messageId ?? null],
+        );
+        await ctx.db.execute(`UPDATE ${leadsTable(ctx)} SET status = 'contacted', updated_at = now() WHERE id = $1`, [lead.id]);
+        await ctx.activity.log({ companyId: runCtx.companyId, message: `Sent outbound email to ${lead.email}`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, leadId: lead.id, subject } });
+        return await finishToolEvent(ctx, eventId, { content: `Sent to ${lead.email} via ${sender.mode} SMTP.`, data: { emailId, leadId: lead.id, to: lead.email, status: "sent" } }, { leadId: lead.id, status: "sent" });
+      } catch (sendError) {
+        const message = sendError instanceof Error ? sendError.message : String(sendError);
+        await ctx.db.execute(
+          `INSERT INTO ${outboundEmailsTable(ctx)} (id, company_id, lead_id, agent_id, subject, body, from_email, to_email, status, smtp_mode, error)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'failed',$9,$10)`,
+          [emailId, runCtx.companyId, lead.id, runCtx.agentId, subject, body, sender.from, lead.email, sender.mode, message],
+        );
+        return await finishToolEvent(ctx, eventId, { error: `Send failed: ${message}` });
+      }
+    } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
 }
 
 const plugin = definePlugin({
@@ -869,12 +1172,14 @@ const plugin = definePlugin({
       const project = await ctx.projects.managed.reconcile("company-operations", companyId);
       const agent = await ctx.agents.managed.reconcile("growth-operator", companyId);
       const skills = [];
-      for (const key of ["ai-feature-integration", "database-auth", "payments", "blog-publishing", "product-design", "deployment", "qa-recovery"]) {
+      for (const key of FOUNDRY_SKILLS) {
         skills.push(await ctx.skills.managed.reconcile(key, companyId));
       }
       const routines = [];
       routines.push(await ctx.routines.managed.reconcile("weekly-evidence-review", companyId));
       routines.push(await ctx.routines.managed.reconcile("weekly-blog", companyId));
+      routines.push(await ctx.routines.managed.reconcile("weekly-lead-generation", companyId));
+      routines.push(await ctx.routines.managed.reconcile("weekly-outbound", companyId));
       const toolGrants = await applyRoleToolGrants(ctx, companyId);
       await ctx.activity.log({ companyId, message: "Reconciled Foundry company operating template", entityType: "company", entityId: companyId, metadata: { project: project.status, agent: agent.status, skills: skills.map((entry) => entry.status), routines: routines.map((entry) => entry.status), toolGrantAgents: toolGrants.map((entry) => entry.agentId) } });
       return { project, agent, skills, routines, toolGrants };
@@ -894,6 +1199,29 @@ const plugin = definePlugin({
       );
       await ctx.activity.log({ companyId, message: "Updated company-specific Foundry integration settings", entityType: "company", entityId: companyId, metadata: { websiteConfigured: Boolean(websiteUrl), vercelProjectConfigured: Boolean(vercelProjectId), vercelTeamConfigured: Boolean(vercelTeamId) } });
       return { websiteUrl, vercelProjectId, vercelTeamId };
+    });
+
+    ctx.actions.register("save-outbound-settings", async (params) => {
+      const companyId = companyIdFrom(params);
+      const smtpMode = params.smtpMode === "custom" ? "custom" : "platform";
+      const customSmtpHost = optionalId(params.customSmtpHost, "SMTP host");
+      const customSmtpPort = typeof params.customSmtpPort === "string" && /^[0-9]{1,5}$/.test(params.customSmtpPort.trim()) ? params.customSmtpPort.trim() : null;
+      const customSmtpUser = typeof params.customSmtpUser === "string" ? params.customSmtpUser.trim() || null : null;
+      const customSmtpFromEmail = typeof params.customSmtpFromEmail === "string" && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(params.customSmtpFromEmail.trim()) ? params.customSmtpFromEmail.trim() : null;
+      const customSmtpFromName = typeof params.customSmtpFromName === "string" ? params.customSmtpFromName.trim() || null : null;
+      if (smtpMode === "custom" && (!customSmtpHost || !customSmtpUser || !customSmtpFromEmail)) {
+        throw new Error("Custom SMTP requires a host, username, and a valid from-address");
+      }
+      await ctx.db.execute(
+        `INSERT INTO ${ctx.db.namespace}.company_integrations (company_id, smtp_mode, custom_smtp_host, custom_smtp_port, custom_smtp_user, custom_smtp_from_email, custom_smtp_from_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (company_id) DO UPDATE SET smtp_mode=excluded.smtp_mode, custom_smtp_host=excluded.custom_smtp_host,
+           custom_smtp_port=excluded.custom_smtp_port, custom_smtp_user=excluded.custom_smtp_user,
+           custom_smtp_from_email=excluded.custom_smtp_from_email, custom_smtp_from_name=excluded.custom_smtp_from_name, updated_at=now()`,
+        [companyId, smtpMode, customSmtpHost, customSmtpPort, customSmtpUser, customSmtpFromEmail, customSmtpFromName],
+      );
+      await ctx.activity.log({ companyId, message: `Set outbound email connection to ${smtpMode}`, entityType: "company", entityId: companyId, metadata: { smtpMode } });
+      return { smtpMode, customSmtpHost, customSmtpPort, customSmtpUser, customSmtpFromEmail, customSmtpFromName };
     });
 
     ctx.actions.register("ask-ceo", async (params) => {

@@ -4,7 +4,15 @@ import { createPluginBundlerPresets } from "@paperclipai/plugin-sdk/bundlers";
 const presets = createPluginBundlerPresets({ uiEntry: "src/ui/index.tsx" });
 const watch = process.argv.includes("--watch");
 
-const workerContext = await esbuild.context(presets.esbuild.worker);
+// nodemailer's CJS internals (`require("events")`, etc.) break when esbuild
+// inlines them into the ESM worker bundle ("Dynamic require... is not
+// supported"). Keep it external and let Node resolve it normally at runtime.
+const workerPreset = {
+  ...presets.esbuild.worker,
+  external: [...(presets.esbuild.worker.external ?? []), "nodemailer"],
+};
+
+const workerContext = await esbuild.context(workerPreset);
 const manifestContext = await esbuild.context(presets.esbuild.manifest);
 const uiContext = await esbuild.context(presets.esbuild.ui);
 

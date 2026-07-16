@@ -17,6 +17,8 @@ export const TOOL_NAMES = {
   deploymentEvents: "get_vercel_deployment_events",
   deployProject: "deploy_project",
   publishBlog: "publish_blog",
+  recordLeads: "record_leads",
+  sendOutboundEmail: "send_outbound_email",
 } as const;
 
 export const FOUNDRY_SKILLS = [
@@ -27,6 +29,8 @@ export const FOUNDRY_SKILLS = [
   "product-design",
   "deployment",
   "qa-recovery",
+  "lead-generation",
+  "outbound-email",
 ] as const;
 
 export const FOUNDRY_SKILL_KEYS = FOUNDRY_SKILLS.map((key) => `plugin/${PLUGIN_ID.replaceAll(".", "-")}/${key}`);
@@ -34,7 +38,7 @@ export const FOUNDRY_SKILL_KEYS = FOUNDRY_SKILLS.map((key) => `plugin/${PLUGIN_I
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.5.0",
+  version: "0.6.0",
   displayName: "Foundry",
   description: "Founder-facing company control room and secure business tools.",
   author: "Abhinav Mishra",
@@ -122,6 +126,38 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Application auth secret",
         description: "Random application session-signing secret.",
       },
+      smtpMode: {
+        type: "string",
+        enum: ["platform", "custom"],
+        title: "Outbound email connection",
+        description: "'platform' uses Foundry's shared outbound email connection. 'custom' uses the SMTP connection configured below.",
+      },
+      customSmtpHost: {
+        type: "string",
+        title: "Custom SMTP host",
+      },
+      customSmtpPort: {
+        type: "string",
+        title: "Custom SMTP port",
+      },
+      customSmtpUser: {
+        type: "string",
+        title: "Custom SMTP username",
+      },
+      customSmtpPassword: {
+        type: "string",
+        format: "secret-ref",
+        title: "Custom SMTP password",
+        description: "Stored as a company secret. Never exposed to agents or the UI.",
+      },
+      customSmtpFromEmail: {
+        type: "string",
+        title: "Custom SMTP from address",
+      },
+      customSmtpFromName: {
+        type: "string",
+        title: "Custom SMTP from name (optional)",
+      },
     },
   },
   projects: [{
@@ -136,7 +172,7 @@ const manifest: PaperclipPluginManifestV1 = {
     displayName: "Growth Operator",
     role: "growth",
     title: "Growth and Publishing Operator",
-    capabilities: "Publishes evidence-based content, checks live deployments, and reports real growth signals using governed Foundry tools.",
+    capabilities: "Publishes evidence-based content, finds and emails real prospective leads, checks live deployments, and reports real growth signals using governed Foundry tools.",
     adapterType: "opencode_local",
     adapterPreference: ["opencode_local", "codex_local", "claude_local"],
     adapterConfig: {
@@ -149,7 +185,7 @@ const manifest: PaperclipPluginManifestV1 = {
     budgetMonthlyCents: 0,
     instructions: {
       entryFile: "AGENTS.md",
-      content: "You are the Growth and Publishing Operator. Work only from real company evidence. Use Foundry tools for blog publication and deployment verification; never claim publication, traffic, leads, or revenue without a successful tool result. Follow the Paperclip task lifecycle and the managed skills synced into your runtime.",
+      content: "You are the Growth and Publishing Operator. Work only from real company evidence. Use Foundry tools for blog publication, lead generation, outbound email, and deployment verification; never claim publication, traffic, leads, contacts, or revenue without a successful tool result. Follow the Paperclip task lifecycle and the managed skills synced into your runtime.",
     },
   }],
   skills: FOUNDRY_SKILLS.map((key) => ({
@@ -185,6 +221,32 @@ const manifest: PaperclipPluginManifestV1 = {
       catchUpPolicy: "skip_missed",
       triggers: [{ kind: "schedule", label: "Weekly article", enabled: true, cronExpression: "30 9 * * 2", timezone: "UTC", signingMode: null, replayWindowSec: null }],
       issueTemplate: { originId: "routine:weekly-blog", billingCode: "foundry:content" },
+    },
+    {
+      routineKey: "weekly-lead-generation",
+      title: "Find real prospective leads",
+      description: "Research real, sourced candidates who plausibly need this product and call record_leads with them. Skip when no honest candidates can be found. Never invent leads.",
+      assigneeRef: { resourceKind: "agent", resourceKey: "growth-operator" },
+      projectRef: { resourceKind: "project", resourceKey: "company-operations" },
+      status: "active",
+      priority: "low",
+      concurrencyPolicy: "skip_if_active",
+      catchUpPolicy: "skip_missed",
+      triggers: [{ kind: "schedule", label: "Weekly lead search", enabled: true, cronExpression: "0 9 * * 1", timezone: "UTC", signingMode: null, replayWindowSec: null }],
+      issueTemplate: { originId: "routine:weekly-lead-generation", billingCode: "foundry:growth" },
+    },
+    {
+      routineKey: "weekly-outbound",
+      title: "Send outbound email to new leads",
+      description: "Review leads with status 'new' and send each a short, personalized first-contact email via send_outbound_email. Skip leads that are not status 'new'. Skip entirely if outbound email is not configured.",
+      assigneeRef: { resourceKind: "agent", resourceKey: "growth-operator" },
+      projectRef: { resourceKind: "project", resourceKey: "company-operations" },
+      status: "active",
+      priority: "low",
+      concurrencyPolicy: "skip_if_active",
+      catchUpPolicy: "skip_missed",
+      triggers: [{ kind: "schedule", label: "Weekly outbound send", enabled: true, cronExpression: "0 9 * * 3", timezone: "UTC", signingMode: null, replayWindowSec: null }],
+      issueTemplate: { originId: "routine:weekly-outbound", billingCode: "foundry:growth" },
     },
   ],
   tools: [
@@ -294,6 +356,48 @@ const manifest: PaperclipPluginManifestV1 = {
           excerpt: { type: "string", minLength: 20 }, contentMarkdown: { type: "string", minLength: 200 },
         },
         required: ["title", "slug", "excerpt", "contentMarkdown"],
+      },
+    },
+    {
+      name: TOOL_NAMES.recordLeads,
+      displayName: "Record found leads",
+      description: "Store real, sourced prospective-customer leads. Rejects candidates without a source URL and deduplicates by email against existing leads for this company.",
+      parametersSchema: {
+        type: "object",
+        properties: {
+          leads: {
+            type: "array",
+            minItems: 1,
+            maxItems: 25,
+            items: {
+              type: "object",
+              required: ["name", "email", "sourceUrl"],
+              properties: {
+                name: { type: "string", minLength: 1 },
+                title: { type: "string" },
+                companyName: { type: "string" },
+                email: { type: "string", pattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$" },
+                sourceUrl: { type: "string", pattern: "^https?://" },
+                notes: { type: "string", maxLength: 500 },
+              },
+            },
+          },
+        },
+        required: ["leads"],
+      },
+    },
+    {
+      name: TOOL_NAMES.sendOutboundEmail,
+      displayName: "Send outbound email",
+      description: "Send a real first-contact email to a recorded lead through whichever SMTP connection the company has configured (custom, or the shared Foundry default). Fails honestly if no connection is configured. Updates the lead's status.",
+      parametersSchema: {
+        type: "object",
+        properties: {
+          leadId: { type: "string" },
+          subject: { type: "string", minLength: 3, maxLength: 200 },
+          body: { type: "string", minLength: 20, maxLength: 5000 },
+        },
+        required: ["leadId", "subject", "body"],
       },
     },
   ],

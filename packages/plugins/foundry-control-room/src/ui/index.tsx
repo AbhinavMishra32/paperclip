@@ -16,7 +16,10 @@ type RunEvent = { id: number; runId: string; agentId: string; seq: number; event
 type Activity = { id: string; actorType: string; actorId: string; action: string; agentId: string | null; entityType: string; entityId: string; createdAt: string; details: Record<string, unknown> | null };
 type Workspace = { id: string; name: string; projectName: string; path: string; repoUrl: string | null; isPrimary: boolean };
 type Document = { id: string; key: string; title: string | null; issueId: string; issueIdentifier: string | null; issueTitle: string; updatedAt: string };
-type Integration = { configured: boolean; url?: string | null; projectConfigured?: boolean };
+type Integration = { configured: boolean; url?: string | null; projectConfigured?: boolean; mode?: "platform" | "custom" };
+type Lead = { id: string; name: string; title: string | null; companyName: string | null; email: string; sourceUrl: string; notes: string | null; status: "new" | "contacted" | "replied" | "bounced" | "unsubscribed" | "do_not_contact"; createdAt: string; updatedAt: string };
+type OutboundEmail = { id: string; leadId: string; subject: string; body: string; fromEmail: string; toEmail: string; status: "sent" | "failed"; smtpMode: "platform" | "custom"; error: string | null; createdAt: string };
+type RoutineSummary = { key: string; title: string; cronExpression: string | null; nextRunAt: string | null; lastRunAt: string | null; lastRunStatus: string | null; lastRunIssueIdentifier: string | null };
 type FounderCeoMessage = { id: string; agentId: string | null; role: "founder" | "ceo" | "system"; body: string; status: "queued" | "running" | "completed" | "failed"; runId: string | null; error: string | null; createdAt: string; updatedAt: string };
 type ToolEvent = { id: string; agentId: string | null; runId: string | null; toolName: string; status: "running" | "succeeded" | "failed"; summary: string | null; error: string | null; metadata: Record<string, unknown>; createdAt: string; updatedAt: string };
 type Snapshot = {
@@ -34,9 +37,16 @@ type Snapshot = {
   chatMessages: FounderCeoMessage[];
   toolEvents: ToolEvent[];
   workspaces: Workspace[];
+  leads: Lead[];
+  outboundEmails: OutboundEmail[];
+  routines: RoutineSummary[];
   documents: Document[];
   integrations: Record<string, Integration>;
-  integrationSettings: { websiteUrl: string; vercelProjectId: string; vercelTeamId: string };
+  integrationSettings: {
+    websiteUrl: string; vercelProjectId: string; vercelTeamId: string;
+    smtpMode: "platform" | "custom"; customSmtpHost: string; customSmtpPort: string;
+    customSmtpUser: string; customSmtpFromEmail: string; customSmtpFromName: string;
+  };
   counts: { activeIssues: number; completedIssues: number; failedRuns: number; activeRuns: number; connectedOpenCodeAgents: number };
   honestRead: string[];
 };
@@ -206,10 +216,64 @@ const css = `
   .fc-spin{width:22px;height:22px;border-radius:50%;border:2.5px solid #dfe3ee;border-top-color:var(--fc-accent);animation:fc-spin .8s linear infinite}
   @keyframes fc-spin{to{transform:rotate(360deg)}}
 
+  /* ---- smtp toggle ---- */
+  .fc-smtp-toggle{display:flex;gap:8px;margin:10px 0}
+  .fc-smtp-toggle button{flex:1;justify-content:center}
+
+  /* ---- routines ---- */
+  .fc-routine-row{padding:11px 0;border-bottom:1px solid var(--fc-line)}
+  .fc-routine-row:last-child{border:0}
+  .fc-routine-title{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px}
+  .fc-routine-meta{display:flex;gap:14px;margin-top:4px;font-size:11.5px}
+
+  /* ---- contacts / outbound ---- */
+  .fc-contact-row{display:flex;align-items:center;gap:11px;width:100%;padding:10px 8px;margin:0 -8px;border:0;
+    background:none;border-radius:10px;cursor:pointer;text-align:left;border-bottom:1px solid var(--fc-line);
+    font:inherit;color:inherit;transition:background .15s ease}
+  .fc-contact-row:last-child{border-bottom:0}
+  .fc-contact-row:hover{background:#f7f8fc}
+  .fc-contact-info{display:grid;gap:2px;flex:1;min-width:0;font-size:13px}
+  .fc-contact-info span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fc-contact-count{display:flex;align-items:center;gap:4px;font-size:11px}
+  .fc-contact-count svg{width:11px;height:11px}
+  .fc-avatar{width:34px;height:34px;border-radius:50%;flex:none;display:grid;place-items:center;
+    background:linear-gradient(155deg,var(--fc-accent),var(--fc-cyan));color:#fff;font-weight:750;font-size:13px;letter-spacing:-.02em}
+  .fc-avatar.small{width:28px;height:28px;font-size:11px}
+  .fc-tag.lead-new{color:#3b5bdb;background:rgba(59,91,219,.1);border-color:transparent}
+  .fc-tag.lead-contacted{color:#0f7a44;background:rgba(22,163,74,.12);border-color:transparent}
+  .fc-tag.lead-replied{color:#0f7a44;background:rgba(22,163,74,.2);border-color:transparent}
+  .fc-tag.lead-bounced,.fc-tag.lead-unsubscribed,.fc-tag.lead-do_not_contact{color:var(--fc-red);background:rgba(224,56,74,.1);border-color:transparent}
+
+  /* ---- contact modal (gmail-style) ---- */
+  .fc-modal-backdrop{position:fixed;inset:0;background:rgba(15,20,35,.5);backdrop-filter:blur(3px);
+    display:grid;place-items:center;z-index:50;padding:24px;animation:fc-fade .18s ease}
+  @keyframes fc-fade{from{opacity:0}to{opacity:1}}
+  .fc-modal{background:#fff;border-radius:18px;box-shadow:var(--fc-shadow-lg);width:min(640px,100%);
+    max-height:min(760px,86vh);overflow-y:auto;animation:fc-rise .22s cubic-bezier(.16,1,.3,1) both}
+  .fc-modal-head{display:flex;align-items:center;gap:12px;padding:20px 22px;border-bottom:1px solid var(--fc-line);position:sticky;top:0;background:#fff;z-index:1}
+  .fc-modal-head-text{display:grid;gap:2px;flex:1;min-width:0}
+  .fc-modal-head-text span{font-size:12.5px}
+  .fc-modal-close{padding:8px;border-radius:50%}
+  .fc-modal-meta{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 22px;
+    font-size:12.5px;color:var(--fc-muted);border-bottom:1px solid var(--fc-line)}
+  .fc-modal-meta span{display:flex;align-items:center;gap:6px}
+  .fc-modal-meta svg{width:13px;height:13px}
+  .fc-modal-notes{padding:12px 22px 0;font-size:13px;color:var(--fc-muted);font-style:italic}
+  .fc-modal-emails{padding:14px 22px 22px;display:grid;gap:14px}
+  .fc-gmail{border:1px solid var(--fc-line);border-radius:14px;overflow:hidden}
+  .fc-gmail-head{display:flex;align-items:center;gap:10px;padding:12px 14px;background:#fafbff;border-bottom:1px solid var(--fc-line)}
+  .fc-gmail-head-text{flex:1;min-width:0;display:grid;gap:1px}
+  .fc-gmail-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px}
+  .fc-gmail-row time{font-size:11px;color:var(--fc-faint);font-weight:500}
+  .fc-gmail-subject{font-weight:700;font-size:14px;padding:12px 14px 0}
+  .fc-gmail-body{white-space:pre-wrap;padding:8px 14px 14px;font-size:13.5px;line-height:1.6;color:#334155}
+  .fc-gmail-error{padding:0 14px 12px;font-size:12px}
+
   @media(max-width:1180px){.fc-layout{grid-template-columns:1fr 1fr}.fc-side{grid-column:1/-1;position:static}}
   @media(max-width:760px){.fc{margin:-16px}.fc-layout{grid-template-columns:1fr;padding:14px}
     .fc-top{padding:12px 14px;flex-wrap:wrap}.fc-updated{display:none}.fc-company{font-size:15px}
-    .fc-line{grid-template-columns:46px 64px 1fr}.fc-pre{margin-left:0}.fc-term-meta{display:none}}
+    .fc-line{grid-template-columns:46px 64px 1fr}.fc-pre{margin-left:0}.fc-term-meta{display:none}
+    .fc-modal{max-height:92vh}}
 `;
 
 function money(cents: number) { return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(cents / 100); }
@@ -232,6 +296,10 @@ const ICON = {
   target: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z",
   users: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",
   terminal: "m4 17 6-5-6-5M12 19h8",
+  mail: "M3 5h18a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM2 6l10 8 10-8",
+  clock: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2",
+  close: "M18 6 6 18M6 6l12 12",
+  send: "m3 20 18-8L3 4l0 7 12 1-12 1z",
 };
 
 function Panel(props: { title: string; icon?: string; children: React.ReactNode; className?: string }) {
@@ -300,6 +368,56 @@ function Terminal({ rows, activeRuns, agentCount, syncing, syncError }: { rows: 
   </section>;
 }
 
+const LEAD_STATUS_LABEL: Record<Lead["status"], string> = {
+  new: "New", contacted: "Contacted", replied: "Replied",
+  bounced: "Bounced", unsubscribed: "Unsubscribed", do_not_contact: "Do not contact",
+};
+
+function initialsOf(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase() || "?";
+}
+
+function ContactModal({ lead, emails, onClose }: { lead: Lead; emails: OutboundEmail[]; onClose: () => void }) {
+  return <div className="fc-modal-backdrop" onClick={onClose}>
+    <div className="fc-modal" onClick={(event) => event.stopPropagation()}>
+      <div className="fc-modal-head">
+        <div className="fc-avatar">{initialsOf(lead.name)}</div>
+        <div className="fc-modal-head-text">
+          <strong>{lead.name}</strong>
+          <span className="fc-muted">{[lead.title, lead.companyName].filter(Boolean).join(" · ") || lead.email}</span>
+        </div>
+        <span className={`fc-tag lead-${lead.status}`}>{LEAD_STATUS_LABEL[lead.status]}</span>
+        <button className="fc-modal-close" onClick={onClose}><Icon path={ICON.close} /></button>
+      </div>
+      <div className="fc-modal-meta">
+        <span><Icon path={ICON.mail} /> {lead.email}</span>
+        <a href={lead.sourceUrl} target="_blank" rel="noopener noreferrer">source ↗</a>
+      </div>
+      {lead.notes && <p className="fc-modal-notes">{lead.notes}</p>}
+      <div className="fc-modal-emails">
+        {emails.length === 0
+          ? <Empty>No outbound email has been sent to this contact yet.</Empty>
+          : emails.map((email) => (
+            <div className="fc-gmail" key={email.id}>
+              <div className="fc-gmail-head">
+                <div className="fc-avatar small">{initialsOf(lead.name)}</div>
+                <div className="fc-gmail-head-text">
+                  <div className="fc-gmail-row"><strong>{email.fromEmail}</strong><time>{when(email.createdAt)}</time></div>
+                  <span className="fc-muted">to {email.toEmail}</span>
+                </div>
+                <span className={`fc-tag ${email.status === "failed" ? "error" : "done"}`}>{email.status}</span>
+              </div>
+              <div className="fc-gmail-subject">{email.subject}</div>
+              <div className="fc-gmail-body">{email.body}</div>
+              {email.error && <p className="fc-error fc-gmail-error">{email.error}</p>}
+            </div>
+          ))}
+      </div>
+    </div>
+  </div>;
+}
+
 export function ControlRoomPage({ context }: PluginPageProps) {
   const companyId = context.companyId ?? "";
   const navigation = useHostNavigation();
@@ -310,7 +428,8 @@ export function ControlRoomPage({ context }: PluginPageProps) {
   const askCeo = usePluginAction("ask-ceo");
   const setupCompany = usePluginAction("setup-company");
   const saveCompanyIntegrations = usePluginAction("save-company-integrations");
-  const [busy, setBusy] = useState<"run" | "chat" | "setup" | null>(null);
+  const saveOutboundSettings = usePluginAction("save-outbound-settings");
+  const [busy, setBusy] = useState<"run" | "chat" | "setup" | "outbound" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [syncing, setSyncing] = useState(false);
@@ -319,6 +438,13 @@ export function ControlRoomPage({ context }: PluginPageProps) {
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [vercelProjectId, setVercelProjectId] = useState("");
   const [vercelTeamId, setVercelTeamId] = useState("");
+  const [smtpMode, setSmtpMode] = useState<"platform" | "custom">("platform");
+  const [customSmtpHost, setCustomSmtpHost] = useState("");
+  const [customSmtpPort, setCustomSmtpPort] = useState("");
+  const [customSmtpUser, setCustomSmtpUser] = useState("");
+  const [customSmtpFromEmail, setCustomSmtpFromEmail] = useState("");
+  const [customSmtpFromName, setCustomSmtpFromName] = useState("");
+  const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
 
   useEffect(() => {
     if (fetchedData) setLastData(fetchedData);
@@ -329,6 +455,12 @@ export function ControlRoomPage({ context }: PluginPageProps) {
     setWebsiteUrl(data.integrationSettings.websiteUrl);
     setVercelProjectId(data.integrationSettings.vercelProjectId);
     setVercelTeamId(data.integrationSettings.vercelTeamId);
+    setSmtpMode(data.integrationSettings.smtpMode);
+    setCustomSmtpHost(data.integrationSettings.customSmtpHost);
+    setCustomSmtpPort(data.integrationSettings.customSmtpPort);
+    setCustomSmtpUser(data.integrationSettings.customSmtpUser);
+    setCustomSmtpFromEmail(data.integrationSettings.customSmtpFromEmail);
+    setCustomSmtpFromName(data.integrationSettings.customSmtpFromName);
     setSettingsCompanyId(data.company.id);
   }, [data, settingsCompanyId]);
 
@@ -383,6 +515,17 @@ export function ControlRoomPage({ context }: PluginPageProps) {
     return [...eventRows, ...runRows, ...auditRows].sort((a, b) => +new Date(a.at) - +new Date(b.at)).slice(-70);
   }, [data]);
 
+  const emailsByLead = useMemo(() => {
+    const map = new Map<string, OutboundEmail[]>();
+    for (const email of data?.outboundEmails ?? []) {
+      const list = map.get(email.leadId) ?? [];
+      list.push(email);
+      map.set(email.leadId, list);
+    }
+    return map;
+  }, [data]);
+  const selectedLead = data?.leads.find((lead) => lead.id === selectedLeadId) ?? null;
+
   async function runCeo() {
     setBusy("run"); setActionError(null);
     try { await invokeCeo({ companyId }); await refresh(); } catch (err) { setActionError(err instanceof Error ? err.message : String(err)); } finally { setBusy(null); }
@@ -399,6 +542,13 @@ export function ControlRoomPage({ context }: PluginPageProps) {
   async function saveIntegrations() {
     setBusy("setup"); setActionError(null);
     try { await saveCompanyIntegrations({ companyId, websiteUrl, vercelProjectId, vercelTeamId }); await refresh(); } catch (err) { setActionError(err instanceof Error ? err.message : String(err)); } finally { setBusy(null); }
+  }
+  async function saveOutbound() {
+    setBusy("outbound"); setActionError(null);
+    try {
+      await saveOutboundSettings({ companyId, smtpMode, customSmtpHost, customSmtpPort, customSmtpUser, customSmtpFromEmail, customSmtpFromName });
+      await refresh();
+    } catch (err) { setActionError(err instanceof Error ? err.message : String(err)); } finally { setBusy(null); }
   }
 
   if (loading && !data) return <><style>{css}</style><main className="fc-loading"><span className="fc-spin" />Loading live company state…</main></>;
@@ -456,6 +606,16 @@ export function ControlRoomPage({ context }: PluginPageProps) {
         <Panel title="Milestone" icon={ICON.target}>
           {activeGoal ? <><div className="fc-kicker">Active goal</div><h2>{activeGoal.title}</h2><p>{activeGoal.description}</p></> : <Empty>No active goal is set. Create one in Paperclip to give the company a north star.</Empty>}
         </Panel>
+        <Panel title="Routines" icon={ICON.clock}>
+          {data.routines.map((routine) => <div className="fc-routine-row" key={routine.key}>
+            <div className="fc-routine-title"><strong>{routine.title}</strong>{routine.lastRunStatus && <span className={`fc-tag ${routine.lastRunStatus === "failed" ? "error" : "done"}`}>{routine.lastRunStatus}</span>}</div>
+            <div className="fc-routine-meta">
+              <span className="fc-muted">Last: {routine.lastRunAt ? when(routine.lastRunAt) : "never"}</span>
+              <span className="fc-muted">Next: {routine.nextRunAt ? when(routine.nextRunAt) : "unscheduled"}</span>
+            </div>
+          </div>)}
+          {data.routines.length === 0 && <Empty>No routines are configured.</Empty>}
+        </Panel>
       </div>
       <div className="fc-col">
         <Panel title="Agent connections" icon={ICON.users}>
@@ -464,7 +624,7 @@ export function ControlRoomPage({ context }: PluginPageProps) {
           <p className="fc-note">"Connected" means configured in Paperclip. MCP availability is proven per run in activity/tool audit, not inferred from this card.</p>
         </Panel>
         <Panel title="Connections & tools" icon={ICON.plug}>
-          {Object.entries(data.integrations).map(([name, status]) => <div className="fc-row" key={name}><span><span className={`fc-dot ${status.configured ? "" : "off"}`} />{name}</span><strong>{status.configured ? "Configured" : "Not configured"}</strong></div>)}
+          {Object.entries(data.integrations).map(([name, status]) => <div className="fc-row" key={name}><span><span className={`fc-dot ${status.configured ? "" : "off"}`} />{name}</span><strong>{status.configured ? (status.mode ? `Configured · ${status.mode}` : "Configured") : "Not configured"}</strong></div>)}
           <div className="fc-fields">
             <div className="fc-field"><label>Production website</label><input value={websiteUrl} onChange={(event) => setWebsiteUrl(event.target.value)} placeholder="https://product.example" /></div>
             <div className="fc-field"><label>Vercel project ID</label><input value={vercelProjectId} onChange={(event) => setVercelProjectId(event.target.value)} placeholder="prj_…" /></div>
@@ -476,6 +636,42 @@ export function ControlRoomPage({ context }: PluginPageProps) {
             <a className="fc-btn" {...navigation.linkProps("/apps/advanced/audit")}>Access & audit</a>
           </div>
           <p className="fc-note">Statuses come from company-bound settings and secret references. Agent access is enforced by Paperclip grants, profiles, and policies.</p>
+          <hr className="fc-rule" />
+          <div className="fc-kicker">Outbound email connection</div>
+          <div className="fc-smtp-toggle">
+            <button className={smtpMode === "platform" ? "primary" : ""} onClick={() => setSmtpMode("platform")}>Foundry shared connection</button>
+            <button className={smtpMode === "custom" ? "primary" : ""} onClick={() => setSmtpMode("custom")}>Custom SMTP</button>
+          </div>
+          {smtpMode === "platform"
+            ? <p className="fc-note">Outbound email sends through Foundry's shared connection. No setup needed here.</p>
+            : <>
+              <div className="fc-fields">
+                <div className="fc-field"><label>SMTP host</label><input value={customSmtpHost} onChange={(event) => setCustomSmtpHost(event.target.value)} placeholder="smtp.yourprovider.com" /></div>
+                <div className="fc-field"><label>SMTP port</label><input value={customSmtpPort} onChange={(event) => setCustomSmtpPort(event.target.value)} placeholder="587" /></div>
+                <div className="fc-field"><label>SMTP username</label><input value={customSmtpUser} onChange={(event) => setCustomSmtpUser(event.target.value)} placeholder="apikey or username" /></div>
+                <div className="fc-field"><label>From address</label><input value={customSmtpFromEmail} onChange={(event) => setCustomSmtpFromEmail(event.target.value)} placeholder="outbound@yourdomain.com" /></div>
+                <div className="fc-field"><label>From name (optional)</label><input value={customSmtpFromName} onChange={(event) => setCustomSmtpFromName(event.target.value)} placeholder="Your Company" /></div>
+              </div>
+              <p className="fc-note">Set the SMTP password as a secret under <a href={navigation.linkProps("/apps").href}>Secret connections</a> (Custom SMTP password). It is never shown here.</p>
+            </>}
+          <div className="fc-buttons"><button className="primary" onClick={() => void saveOutbound()} disabled={busy !== null}>{busy === "outbound" ? "Saving…" : "Save outbound settings"}</button></div>
+        </Panel>
+        <Panel title="Outbound" icon={ICON.mail}>
+          <div className="fc-kicker">{data.leads.length} contact{data.leads.length === 1 ? "" : "s"} found · {data.outboundEmails.filter((email) => email.status === "sent").length} email{data.outboundEmails.filter((email) => email.status === "sent").length === 1 ? "" : "s"} sent</div>
+          {data.leads.length === 0
+            ? <Empty>No leads have been found yet. The weekly lead-generation routine will populate this list.</Empty>
+            : data.leads.slice(0, 15).map((lead) => {
+              const emails = emailsByLead.get(lead.id) ?? [];
+              return <button className="fc-contact-row" key={lead.id} onClick={() => setSelectedLeadId(lead.id)}>
+                <div className="fc-avatar small">{initialsOf(lead.name)}</div>
+                <span className="fc-contact-info">
+                  <strong>{lead.name}</strong>
+                  <span className="fc-muted">{[lead.title, lead.companyName].filter(Boolean).join(" · ") || lead.email}</span>
+                </span>
+                <span className={`fc-tag lead-${lead.status}`}>{LEAD_STATUS_LABEL[lead.status]}</span>
+                {emails.length > 0 && <span className="fc-muted fc-contact-count"><Icon path={ICON.mail} /> {emails.length}</span>}
+              </button>;
+            })}
         </Panel>
         <Panel title="Governed tool activity" icon={ICON.plug}>
           {data.toolEvents.slice(0, 12).map((event) => <div className="fc-row" key={event.id}><span><strong>{event.toolName}</strong><br /><span className={event.status === "failed" ? "fc-error" : "fc-muted"}>{event.error ?? event.summary ?? "In progress"}</span></span><span><span className="fc-tag">{event.status}</span><br /><time>{when(event.updatedAt)}</time></span></div>)}
@@ -508,5 +704,6 @@ export function ControlRoomPage({ context }: PluginPageProps) {
         </section>
       </aside>
     </div>
+    {selectedLead && <ContactModal lead={selectedLead} emails={emailsByLead.get(selectedLead.id) ?? []} onClose={() => setSelectedLeadId(null)} />}
   </main></>;
 }

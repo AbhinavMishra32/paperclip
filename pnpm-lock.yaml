@@ -578,6 +578,9 @@ importers:
       '@paperclipai/plugin-sdk':
         specifier: workspace:*
         version: link:../sdk
+      nodemailer:
+        specifier: ^7.0.9
+        version: 7.0.13
       react:
         specifier: ^19.2.7
         version: 19.2.7
@@ -585,6 +588,9 @@ importers:
       '@types/node':
         specifier: ^22.19.21
         version: 22.19.21
+      '@types/nodemailer':
+        specifier: ^7.0.2
+        version: 7.0.12
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17
@@ -4856,6 +4862,9 @@ packages:
   '@types/node@25.2.3':
     resolution: {integrity: sha512-m0jEgYlYz+mDJZ2+F4v8D1AyQb+QzsNqRuI7xg1VQX/KlKS0qT9r1Mo16yo5F/MtifXFgaofIFsdFMox2SxIbQ==}
 
+  '@types/nodemailer@7.0.12':
+    resolution: {integrity: sha512-80vKwiIsVSyFA1rRovH59jNPLBOuc6dRZIHEu40gXTkBkZnQv8vog1xSGEb9j5q/tdMAs5ivvDR2pLTU0hGHXA==}
+
   '@types/qs@6.14.0':
     resolution: {integrity: sha512-eOunJqu0K1923aExK6y8p6fsihYEn/BYuQ4g0CxAAgFc4b/ZLN4CrsRZ55srTdqoiLzU2B2evC+apEIxprEzkQ==}
 
@@ -7095,6 +7104,10 @@ packages:
   node-releases@2.0.51:
     resolution: {integrity: sha512-wRNIrw4DmVLKQlbgOMdkMx27Wrpzes2hh5Jtbi2bjPd+4wJstWIqP5A+lscnqbm0xxmT5Bpg8Lec5ItEBwx6BQ==}
     engines: {node: '>=18'}
+
+  nodemailer@7.0.13:
+    resolution: {integrity: sha512-PNDFSJdP+KFgdsG3ZzMXCgquO7I6McjY2vlqILjtJd0hy8wEvtugS9xKRF2NWlPNGxvLCXlTNIae4serI7dinw==}
+    engines: {node: '>=6.0.0'}
 
   nopt@5.0.0:
     resolution: {integrity: sha512-Tbj67rffqceeLpcRXrT7vKAN8CwfPeIBgM7E6iBkmKLV7bEMwpGgYLGv0jACUsECaa/vuxP0IjEont6umdMgtQ==}
@@ -12335,6 +12348,10 @@ snapshots:
       undici-types: 7.16.0
     optional: true
 
+  '@types/nodemailer@7.0.12':
+    dependencies:
+      '@types/node': 24.13.3
+
   '@types/qs@6.14.0': {}
 
   '@types/range-parser@1.2.7': {}
@@ -15026,6 +15043,8 @@ snapshots:
   node-releases@2.0.27: {}
 
   node-releases@2.0.51: {}
+
+  nodemailer@7.0.13: {}
 
   nopt@5.0.0:
     dependencies:
