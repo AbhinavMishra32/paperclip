@@ -394,6 +394,42 @@ async function matchingDeployment(ctx: PluginContext, companyId: string, config:
   return null;
 }
 
+async function deployWithVercelCli(
+  ctx: PluginContext,
+  companyId: string,
+  runId: string,
+  config: FoundryConfig,
+  workspacePath: string,
+) {
+  if (!isSecretRef(config.vercelToken) || !config.vercelProjectId) {
+    throw new Error("Vercel token and project ID are not configured");
+  }
+  const token = await ctx.secrets.resolve(config.vercelToken, { companyId, configPath: "vercelToken" });
+  const runtimeRoot = `/tmp/foundry-vercel/${runId}`;
+  await mkdir(runtimeRoot, { recursive: true });
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: runtimeRoot,
+    NO_COLOR: "1",
+    npm_config_cache: `${runtimeRoot}/npm-cache`,
+    VERCEL_TOKEN: token,
+    VERCEL_PROJECT_ID: config.vercelProjectId,
+  };
+  if (config.vercelTeamId) env.VERCEL_ORG_ID = config.vercelTeamId;
+  const result = await execFileAsync(
+    "npx",
+    ["--yes", "vercel@56.2.1", "deploy", "--prod", "--yes", "--non-interactive", "--archive=tgz"],
+    { cwd: workspacePath, env, timeout: 15 * 60_000, maxBuffer: 4_000_000 },
+  );
+  const deploymentUrl = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .reverse()
+    .find((line) => /^https:\/\/[A-Za-z0-9.-]+$/.test(line));
+  if (!deploymentUrl) throw new Error("Vercel CLI completed without returning a deployment URL");
+  return deploymentUrl;
+}
+
 async function provisionVercelEnv(
   ctx: PluginContext,
   companyId: string,
@@ -615,7 +651,7 @@ function registerTools(ctx: PluginContext) {
 
   ctx.tools.register(TOOL_NAMES.deployProject, {
     displayName: "Deploy project",
-    description: "Push the committed project workspace and observe the matching Vercel deployment.",
+    description: "Push the committed project workspace, deploy it to the configured Vercel project, and return the real production result.",
     parametersSchema: { type: "object", properties: {} },
   }, async (_raw, runCtx): Promise<ToolResult> => {
     const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.deployProject);
@@ -627,11 +663,14 @@ function registerTools(ctx: PluginContext) {
       const sha = await git(workspace.path, ["rev-parse", "HEAD"]);
       const branch = await git(workspace.path, ["rev-parse", "--abbrev-ref", "HEAD"]);
       await git(workspace.path, ["push", "origin", `HEAD:${branch}`]);
-      const deployment = await matchingDeployment(ctx, runCtx.companyId, config, sha);
-      await ctx.activity.log({ companyId: runCtx.companyId, message: `Pushed ${sha.slice(0, 12)} for Vercel deployment`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, sha, branch, deployment } });
-      const result: ToolResult = deployment
-        ? { content: `Pushed ${sha}. Vercel deployment ${String(deployment.id)} is ${String(deployment.state)} at ${String(deployment.url ?? "URL pending")}.`, data: { sha, branch, deployment } }
-        : { content: `Pushed ${sha}. Vercel has not exposed the matching deployment yet; call get_vercel_deployments to follow it.`, data: { sha, branch, deployment: null } };
+      const deploymentUrl = await deployWithVercelCli(ctx, runCtx.companyId, runCtx.runId, config, workspace.path);
+      const deployments = await vercelDeployments(ctx, runCtx.companyId, config, 20);
+      const deployment = deployments.find((entry) => entry.url === deploymentUrl) ?? null;
+      await ctx.activity.log({ companyId: runCtx.companyId, message: `Deployed ${sha.slice(0, 12)} to Vercel production`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, sha, branch, deploymentUrl, deployment } });
+      const result: ToolResult = {
+        content: `Pushed ${sha}. Vercel production deployment is available at ${deploymentUrl}${deployment ? ` with state ${String(deployment.state)}` : ""}.`,
+        data: { sha, branch, deploymentUrl, deployment },
+      };
       return await finishToolEvent(ctx, eventId, result, { sha, branch, deployment });
     } catch (error) { return await failToolEvent(ctx, eventId, error); }
   });
