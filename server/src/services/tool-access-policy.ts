@@ -672,6 +672,10 @@ function scopeAllowsTool(scope: Record<string, unknown> | null, ctx: ToolAccessC
   if (allowed.includes(`tool:${ctx.toolName}`)) return true;
   if (ctx.connectionId && allowed.includes(`connection:${ctx.connectionId}`)) return true;
   if (ctx.applicationId && allowed.includes(`application:${ctx.applicationId}`)) return true;
+  // `allow` is an explicit allowlist. A malformed or non-matching entry must
+  // fail closed instead of falling through to selectorMatches(), which ignores
+  // unknown keys and would otherwise turn it into an unrestricted grant.
+  if (allowed.length > 0) return false;
   return selectorMatches(scope, ctx);
 }
 

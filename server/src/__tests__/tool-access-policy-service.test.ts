@@ -526,6 +526,36 @@ describeEmbeddedPostgres("tool access policy service", () => {
     });
   });
 
+  it("fails closed for malformed or non-matching tools:use allowlists", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { connection, catalogEntry } = await createTool(db, company.id);
+    const [grant] = await db.insert(principalPermissionGrants).values({
+      companyId: company.id,
+      principalType: "agent",
+      principalId: agent.id,
+      permissionKey: "tools:use",
+      scope: { allow: ["send_email"] },
+    }).returning();
+    const input = {
+      companyId: company.id,
+      actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      request: { connectionId: connection.id, catalogEntryId: catalogEntry.id, toolName: "send_email" },
+    };
+
+    await expect(toolAccessPolicyService(db).decide(input)).resolves.toMatchObject({
+      allowed: false,
+      reasonCode: "deny_default",
+    });
+    await db.update(principalPermissionGrants)
+      .set({ scope: { allow: ["tool:send_email"] }, updatedAt: new Date() })
+      .where(eq(principalPermissionGrants.id, grant.id));
+    await expect(toolAccessPolicyService(db).decide(input)).resolves.toMatchObject({
+      allowed: true,
+      reasonCode: "allow_explicit_grant",
+    });
+  });
+
   it("manages generic tool policies without exposing trust rules", async () => {
     const company = await createCompany(db);
     const otherCompany = await createCompany(db);
