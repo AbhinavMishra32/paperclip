@@ -19,9 +19,9 @@ const namespacedTool = (name: string) => `tool:foundry.control-room:${name}`;
 
 const ROLE_TOOL_NAMES: Record<string, string[]> = {
   ceo: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments],
-  "engineering-manager": [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deployProject],
-  cto: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deployProject],
-  qa: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments],
+  "engineering-manager": [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents, TOOL_NAMES.deployProject],
+  cto: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents, TOOL_NAMES.deployProject],
+  qa: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents],
   growth: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.listDeployments, TOOL_NAMES.publishBlog],
 };
 
@@ -646,6 +646,29 @@ function registerTools(ctx: PluginContext) {
       const config = await getConfig(ctx, runCtx.companyId);
       const deployments = await vercelDeployments(ctx, runCtx.companyId, config, Number((raw as { limit?: number }).limit ?? 10));
       return await finishToolEvent(ctx, eventId, { content: `Found ${deployments.length} real Vercel deployments.`, data: { deployments } }, { count: deployments.length });
+    } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
+
+  ctx.tools.register(TOOL_NAMES.deploymentEvents, {
+    displayName: "Get Vercel deployment events",
+    description: "Read real build events for a deployment in the configured Vercel project.",
+    parametersSchema: { type: "object", properties: { deploymentId: { type: "string" }, limit: { type: "integer" } }, required: ["deploymentId"] },
+  }, async (raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.deploymentEvents);
+    try {
+      const input = raw as { deploymentId?: string; limit?: number };
+      const deploymentId = input.deploymentId?.trim() ?? "";
+      if (!/^dpl_[A-Za-z0-9]+$/.test(deploymentId)) return await finishToolEvent(ctx, eventId, { error: "A valid Vercel deployment ID is required." });
+      const config = await getConfig(ctx, runCtx.companyId);
+      if (!isSecretRef(config.vercelToken)) throw new Error("Vercel token is not configured");
+      const token = await ctx.secrets.resolve(config.vercelToken, { companyId: runCtx.companyId, configPath: "vercelToken" });
+      const query = new URLSearchParams({ direction: "backward", follow: "0", limit: String(Math.max(1, Math.min(200, Number(input.limit ?? 100)))) });
+      if (config.vercelTeamId) query.set("teamId", config.vercelTeamId);
+      const response = await ctx.http.fetch(`https://api.vercel.com/v3/deployments/${encodeURIComponent(deploymentId)}/events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
+      const body = await response.json() as Array<{ type?: string; created?: number; payload?: { text?: string; info?: Record<string, unknown>; statusCode?: number } }> | { error?: { message?: string } };
+      if (!response.ok || !Array.isArray(body)) throw new Error(!Array.isArray(body) ? body.error?.message ?? `Vercel request failed with HTTP ${response.status}` : `Vercel request failed with HTTP ${response.status}`);
+      const events = body.reverse().map((entry) => ({ type: entry.type, created: entry.created, text: entry.payload?.text ?? null, info: entry.payload?.info ?? null, statusCode: entry.payload?.statusCode ?? null }));
+      return await finishToolEvent(ctx, eventId, { content: `Found ${events.length} real events for ${deploymentId}.`, data: { deploymentId, events } }, { deploymentId, count: events.length });
     } catch (error) { return await failToolEvent(ctx, eventId, error); }
   });
 

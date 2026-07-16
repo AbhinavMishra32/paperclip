@@ -13,6 +13,7 @@ export const TOOL_NAMES = {
   checkOpenRouter: "check_openrouter_connection",
   provisionAppEnvironment: "provision_app_environment",
   listDeployments: "get_vercel_deployments",
+  deploymentEvents: "get_vercel_deployment_events",
   deployProject: "deploy_project",
   publishBlog: "publish_blog",
 } as const;
@@ -253,6 +254,16 @@ const manifest: PaperclipPluginManifestV1 = {
       displayName: "Get Vercel deployments",
       description: "Read real recent deployments for the configured Vercel project.",
       parametersSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 20 } } },
+    },
+    {
+      name: TOOL_NAMES.deploymentEvents,
+      displayName: "Get Vercel deployment events",
+      description: "Read real build events and error output for one deployment in the configured Vercel project.",
+      parametersSchema: {
+        type: "object",
+        properties: { deploymentId: { type: "string", pattern: "^dpl_[A-Za-z0-9]+$" }, limit: { type: "integer", minimum: 1, maximum: 200 } },
+        required: ["deploymentId"],
+      },
     },
     {
       name: TOOL_NAMES.deployProject,
