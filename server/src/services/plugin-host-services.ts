@@ -12,6 +12,8 @@ import {
   pluginLogs,
   principalPermissionGrants,
   projects as projectsTable,
+  toolMcpGateways,
+  toolProfiles,
 } from "@paperclipai/db";
 import { eq, and, like, desc, inArray, sql, isNull, isNotNull, gt, lte } from "drizzle-orm";
 import type {
@@ -76,6 +78,7 @@ import { getTelemetryClient } from "../telemetry.js";
 import { accessService } from "./access.js";
 import { authorizationService, type AuthorizationActor } from "./authorization.js";
 import { sanitizeRecord } from "../redaction.js";
+import { createToolGatewayService } from "./tool-gateway.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -542,6 +545,7 @@ export function buildHostServices(
   const goals = goalService(db);
   const access = accessService(db);
   const authorization = authorizationService(db);
+  const toolGateway = createToolGatewayService(db);
   const budgets = budgetService(db);
   const issueApprovals = issueApprovalService(db);
   const scopedBus = eventBus.forPlugin(pluginKey);
@@ -553,6 +557,77 @@ export function buildHostServices(
   const ensureCompanyId = (companyId?: string) => {
     if (!companyId) throw new Error("companyId is required for this operation");
     return companyId;
+  };
+
+  /**
+   * A tools:use grant authorizes calls, but local CLI adapters also need a
+   * managed MCP endpoint injected into each run. Reconcile one plugin-owned,
+   * agent-scoped gateway whenever a plugin grants explicit tool selectors.
+   * The empty deny-by-default profile is intentional: the grant remains the
+   * source of truth for which tools are visible and callable.
+   */
+  const reconcilePluginAgentMcpGateway = async (input: {
+    companyId: string;
+    agentId: string;
+    grants: Array<{ permissionKey: string; scope?: Record<string, unknown> | null }>;
+  }) => {
+    const toolGrant = input.grants.find((grant) => grant.permissionKey === "tools:use");
+    const allow = Array.isArray(toolGrant?.scope?.allow)
+      ? toolGrant.scope.allow.filter((value): value is string => typeof value === "string")
+      : [];
+    if (!allow.some((value) => value.startsWith("tool:"))) return;
+
+    const keySlug = pluginKey.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "plugin";
+    const profileKey = `plugin-mcp-${keySlug}-${input.agentId}`.slice(0, 160);
+    const gatewaySlug = `plugin-mcp-${keySlug}-${input.agentId}`.slice(0, 120);
+    let [profile] = await db
+      .select()
+      .from(toolProfiles)
+      .where(and(eq(toolProfiles.companyId, input.companyId), eq(toolProfiles.profileKey, profileKey)))
+      .limit(1);
+    if (!profile) {
+      profile = await db
+        .insert(toolProfiles)
+        .values({
+          companyId: input.companyId,
+          profileKey,
+          name: `${pluginKey} MCP ${input.agentId.slice(0, 8)}`,
+          description: `Managed MCP delivery profile reconciled by plugin ${pluginKey}.`,
+          status: "active",
+          defaultAction: "deny",
+          metadata: { source: "plugin_tool_grant", pluginId, pluginKey, managed: true },
+        })
+        .returning()
+        .then((rows) => rows[0]);
+    }
+    if (!profile) throw new Error("Failed to reconcile plugin MCP profile");
+
+    const [existingGateway] = await db
+      .select()
+      .from(toolMcpGateways)
+      .where(and(eq(toolMcpGateways.companyId, input.companyId), eq(toolMcpGateways.slug, gatewaySlug)))
+      .limit(1);
+    if (!existingGateway) {
+      await toolGateway.createNamedGateway({
+        companyId: input.companyId,
+        body: {
+          name: `${pluginKey} MCP for agent ${input.agentId.slice(0, 8)}`,
+          slug: gatewaySlug,
+          description: `Managed plugin-tool gateway reconciled by ${pluginKey}.`,
+          profileId: profile.id,
+          defaultProfileMode: "gateway_only",
+          contextScopeType: "agent",
+          contextScopeId: input.agentId,
+          agentId: input.agentId,
+          metadata: { source: "plugin_tool_grant", pluginId, pluginKey, managed: true },
+        },
+      });
+    } else if (existingGateway.status !== "active" || existingGateway.profileId !== profile.id) {
+      await db
+        .update(toolMcpGateways)
+        .set({ status: "active", profileId: profile.id, updatedAt: new Date() })
+        .where(eq(toolMcpGateways.id, existingGateway.id));
+    }
   };
 
   const parseWindowValue = (value: unknown): number | null => {
@@ -2470,6 +2545,13 @@ export function buildHostServices(
           })),
           params.grantedByUserId ?? null,
         );
+        if (params.principalType === "agent") {
+          await reconcilePluginAgentMcpGateway({
+            companyId,
+            agentId: params.principalId,
+            grants: params.grants,
+          });
+        }
         await logPluginActivity({
           companyId,
           action: "authorization.grants_updated_by_plugin",

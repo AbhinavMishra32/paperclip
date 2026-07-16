@@ -13,7 +13,9 @@ import { TOOL_NAMES } from "./manifest.js";
 
 const execFileAsync = promisify(execFile);
 const LAGUNA_MODEL = "poolside/laguna-xs-2.1:free";
-const namespacedTool = (name: string) => `foundry.control-room:${name}`;
+// Tool grants use Paperclip's selector syntax (`tool:<namespaced-name>`), while
+// MCP tool names themselves remain `<plugin-key>:<tool-name>`.
+const namespacedTool = (name: string) => `tool:foundry.control-room:${name}`;
 
 const ROLE_TOOL_NAMES: Record<string, string[]> = {
   ceo: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments],

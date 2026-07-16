@@ -8,6 +8,9 @@ import {
   createDb,
   invites,
   principalPermissionGrants,
+  toolMcpGateways,
+  toolProfileBindings,
+  toolProfiles,
 } from "@paperclipai/db";
 import { buildHostServices } from "../services/plugin-host-services.js";
 import {
@@ -54,6 +57,9 @@ describeEmbeddedPostgres("plugin access and authorization host services", () => 
   afterEach(async () => {
     await db.delete(activityLog);
     await db.delete(principalPermissionGrants);
+    await db.delete(toolMcpGateways);
+    await db.delete(toolProfileBindings);
+    await db.delete(toolProfiles);
     await db.delete(invites);
     await db.delete(agents);
     await db.delete(companyMemberships);
@@ -92,6 +98,54 @@ describeEmbeddedPostgres("plugin access and authorization host services", () => 
 
     const rows = await db.select().from(principalPermissionGrants);
     expect(rows).toEqual([]);
+    services.dispose();
+  });
+
+  it("reconciles an agent-scoped managed MCP gateway for plugin tool grants", async () => {
+    const company = await createCompany(db, "PAM");
+    const agent = await db.insert(agents).values({
+      companyId: company.id,
+      name: "Tool agent",
+      role: "engineer",
+      adapterType: "opencode_local",
+      adapterConfig: {},
+      permissions: {},
+    }).returning().then((rows) => rows[0]!);
+    const services = buildHostServices(db, pluginId, "permissions-extension", createEventBusStub());
+
+    await services.authorization.setGrants({
+      companyId: company.id,
+      principalType: "agent",
+      principalId: agent.id,
+      grants: [{
+        permissionKey: "tools:use",
+        scope: { allow: ["tool:permissions-extension:inspect"] },
+      }],
+    });
+    await services.authorization.setGrants({
+      companyId: company.id,
+      principalType: "agent",
+      principalId: agent.id,
+      grants: [{
+        permissionKey: "tools:use",
+        scope: { allow: ["tool:permissions-extension:inspect"] },
+      }],
+    });
+
+    const [gateways, profiles] = await Promise.all([
+      db.select().from(toolMcpGateways),
+      db.select().from(toolProfiles),
+    ]);
+    expect(gateways).toHaveLength(1);
+    expect(profiles).toHaveLength(1);
+    expect(gateways[0]).toMatchObject({
+      companyId: company.id,
+      agentId: agent.id,
+      contextScopeType: "agent",
+      contextScopeId: agent.id,
+      status: "active",
+    });
+    expect(profiles[0]).toMatchObject({ defaultAction: "deny", status: "active" });
     services.dispose();
   });
 
