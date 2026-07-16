@@ -345,7 +345,15 @@ async function resolveWorkspace(ctx: PluginContext, runCtx: { companyId: string;
 }
 
 async function git(workspacePath: string, args: string[]) {
-  const result = await execFileAsync("git", args, { cwd: workspacePath, timeout: 120_000, maxBuffer: 2_000_000 });
+  // Company workspaces may live on a mounted volume whose files are owned by
+  // the host/provisioner rather than the plugin worker uid. Scope the trust
+  // exception to this one resolved workspace instead of mutating global Git
+  // config or disabling ownership checks for every repository.
+  const result = await execFileAsync(
+    "git",
+    ["-c", `safe.directory=${workspacePath}`, ...args],
+    { cwd: workspacePath, timeout: 120_000, maxBuffer: 2_000_000 },
+  );
   return result.stdout.trim();
 }
 
