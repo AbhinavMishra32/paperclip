@@ -665,9 +665,22 @@ function registerTools(ctx: PluginContext) {
       const query = new URLSearchParams({ direction: "backward", follow: "0", limit: String(Math.max(1, Math.min(200, Number(input.limit ?? 100)))) });
       if (config.vercelTeamId) query.set("teamId", config.vercelTeamId);
       const response = await ctx.http.fetch(`https://api.vercel.com/v3/deployments/${encodeURIComponent(deploymentId)}/events?${query}`, { headers: { Authorization: `Bearer ${token}` } });
-      const body = await response.json() as Array<{ type?: string; created?: number; payload?: { text?: string; info?: Record<string, unknown>; statusCode?: number } }> | { error?: { message?: string } };
+      const body = await response.json() as Array<{ type?: string; created?: number; text?: string; message?: string; payload?: unknown }> | { error?: { message?: string } };
       if (!response.ok || !Array.isArray(body)) throw new Error(!Array.isArray(body) ? body.error?.message ?? `Vercel request failed with HTTP ${response.status}` : `Vercel request failed with HTTP ${response.status}`);
-      const events = body.reverse().map((entry) => ({ type: entry.type, created: entry.created, text: entry.payload?.text ?? null, info: entry.payload?.info ?? null, statusCode: entry.payload?.statusCode ?? null }));
+      const events = body.reverse().map((entry) => {
+        let payload = entry.payload;
+        if (typeof payload === "string") {
+          try { payload = JSON.parse(payload) as unknown; } catch { /* plain-text event payload */ }
+        }
+        const detail = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+        return {
+          type: entry.type,
+          created: entry.created,
+          text: typeof payload === "string" ? payload : typeof detail?.text === "string" ? detail.text : entry.text ?? entry.message ?? null,
+          info: detail?.info && typeof detail.info === "object" ? detail.info : null,
+          statusCode: typeof detail?.statusCode === "number" ? detail.statusCode : null,
+        };
+      });
       return await finishToolEvent(ctx, eventId, { content: `Found ${events.length} real events for ${deploymentId}.`, data: { deploymentId, events } }, { deploymentId, count: events.length });
     } catch (error) { return await failToolEvent(ctx, eventId, error); }
   });
