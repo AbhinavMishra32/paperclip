@@ -2231,7 +2231,19 @@ export async function readInstalledSkillTargets(skillsHome: string): Promise<Map
   for (const entry of entries) {
     const fullPath = path.join(skillsHome, entry.name);
     const linkedPath = entry.isSymbolicLink() ? await fs.readlink(fullPath).catch(() => null) : null;
-    out.set(entry.name, resolveInstalledEntryTarget(skillsHome, entry.name, entry, linkedPath));
+    const installed = resolveInstalledEntryTarget(skillsHome, entry.name, entry, linkedPath);
+    if (entry.isDirectory()) {
+      try {
+        const raw = JSON.parse(await fs.readFile(path.join(fullPath, MATERIALIZED_SKILL_SENTINEL), "utf8")) as unknown;
+        const metadata = parseObject(raw);
+        if (metadata.version === 1 && typeof metadata.sourcePath === "string" && metadata.sourcePath.trim()) {
+          installed.targetPath = path.resolve(metadata.sourcePath);
+        }
+      } catch {
+        // Ordinary user-managed skill directories do not carry Paperclip metadata.
+      }
+    }
+    out.set(entry.name, installed);
   }
   return out;
 }
@@ -2651,14 +2663,37 @@ export async function ensurePaperclipSkillSymlink(
   target: string,
   linkSkill: (source: string, target: string) => Promise<void> = (linkSource, linkTarget) =>
     fs.symlink(linkSource, linkTarget),
-): Promise<"created" | "repaired" | "skipped"> {
+): Promise<"created" | "repaired" | "materialized" | "skipped"> {
+  const installWithFilesystemFallback = async () => {
+    try {
+      await linkSkill(source, target);
+      return false;
+    } catch (error) {
+      const code = error && typeof error === "object" ? (error as { code?: unknown }).code : null;
+      if (!["EIO", "EPERM", "ENOSYS", "ENOTSUP", "EOPNOTSUPP"].includes(String(code))) throw error;
+      await materializePaperclipSkillCopy(source, target);
+      return true;
+    }
+  };
+
   const existing = await fs.lstat(target).catch(() => null);
   if (!existing) {
-    await linkSkill(source, target);
-    return "created";
+    return await installWithFilesystemFallback() ? "materialized" : "created";
   }
 
   if (!existing.isSymbolicLink()) {
+    if (existing.isDirectory()) {
+      try {
+        const raw = JSON.parse(await fs.readFile(path.join(target, MATERIALIZED_SKILL_SENTINEL), "utf8")) as unknown;
+        const metadata = parseObject(raw);
+        if (metadata.version === 1 && path.resolve(String(metadata.sourcePath ?? "")) === path.resolve(source)) {
+          await materializePaperclipSkillCopy(source, target);
+          return "materialized";
+        }
+      } catch {
+        // Preserve external skill directories instead of replacing them.
+      }
+    }
     return "skipped";
   }
 
@@ -2676,8 +2711,7 @@ export async function ensurePaperclipSkillSymlink(
   }
 
   await fs.unlink(target);
-  await linkSkill(source, target);
-  return "repaired";
+  return await installWithFilesystemFallback() ? "materialized" : "repaired";
 }
 
 async function hashSkillDirectory(root: string): Promise<string> {
@@ -2848,6 +2882,7 @@ export async function materializePaperclipSkillCopy(
       path.join(tempRoot, MATERIALIZED_SKILL_SENTINEL),
       `${JSON.stringify({
         version: 1,
+        sourcePath: sourceRoot,
         sourceFingerprint,
         copiedFiles: result.copiedFiles,
         skippedSymlinks: result.skippedSymlinks,

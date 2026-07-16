@@ -11,7 +11,9 @@ import {
   buildRuntimeMountedSkillSnapshot,
   buildInvocationEnvForLogs,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+  ensurePaperclipSkillSymlink,
   materializePaperclipSkillCopy,
+  readInstalledSkillTargets,
   refreshPaperclipWorkspaceEnvForExecution,
   renderPaperclipWakePrompt,
   runningProcesses,
@@ -153,6 +155,32 @@ describe("sanitizeSshRemoteEnv", () => {
 });
 
 describe("materializePaperclipSkillCopy", () => {
+  it("falls back to a managed directory copy when the filesystem rejects symlinks", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-skill-symlink-fallback-"));
+    try {
+      const source = path.join(root, "source");
+      const skillsHome = path.join(root, "skills");
+      const target = path.join(skillsHome, "example");
+      await fs.mkdir(source, { recursive: true });
+      await fs.mkdir(skillsHome, { recursive: true });
+      await fs.writeFile(path.join(source, "SKILL.md"), "# real skill\n", "utf8");
+
+      const result = await ensurePaperclipSkillSymlink(source, target, async () => {
+        throw Object.assign(new Error("symlinks unsupported"), { code: "EIO" });
+      });
+
+      expect(result).toBe("materialized");
+      await expect(fs.readFile(path.join(target, "SKILL.md"), "utf8")).resolves.toBe("# real skill\n");
+      const installed = await readInstalledSkillTargets(skillsHome);
+      expect(installed.get("example")).toEqual({
+        targetPath: path.resolve(source),
+        kind: "directory",
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to materialize into an ancestor of the source", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-skill-copy-"));
     try {

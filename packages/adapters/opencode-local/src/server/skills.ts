@@ -78,7 +78,12 @@ export async function syncOpenCodeSkills(
     if (!available) continue;
     if (desiredSet.has(available.key)) continue;
     if (installedEntry.targetPath !== available.source) continue;
-    await fs.unlink(path.join(skillsHome, name)).catch(() => {});
+    const target = path.join(skillsHome, name);
+    if (installedEntry.kind === "directory") {
+      await fs.rm(target, { recursive: true, force: true }).catch(() => {});
+    } else {
+      await fs.unlink(target).catch(() => {});
+    }
   }
 
   return buildOpenCodeSkillSnapshot(ctx.config);
