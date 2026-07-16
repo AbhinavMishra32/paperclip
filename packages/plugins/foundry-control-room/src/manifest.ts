@@ -10,7 +10,7 @@ export const TOOL_NAMES = {
 const manifest: PaperclipPluginManifestV1 = {
   id: "foundry.control-room",
   apiVersion: 1,
-  version: "0.3.0",
+  version: "0.4.0",
   displayName: "Foundry",
   description: "Founder-facing company control room and secure business tools.",
   author: "Abhinav Mishra",
@@ -27,6 +27,9 @@ const manifest: PaperclipPluginManifestV1 = {
     "agent.sessions.create",
     "agent.sessions.list",
     "agent.sessions.send",
+    "database.namespace.migrate",
+    "database.namespace.read",
+    "database.namespace.write",
     "goals.read",
     "activity.read",
     "activity.log.write",
@@ -38,6 +41,10 @@ const manifest: PaperclipPluginManifestV1 = {
   entrypoints: {
     worker: "./dist/worker.js",
     ui: "./dist/ui",
+  },
+  database: {
+    namespaceSlug: "foundry_control_room",
+    migrationsDir: "migrations",
   },
   instanceConfigSchema: {
     type: "object",

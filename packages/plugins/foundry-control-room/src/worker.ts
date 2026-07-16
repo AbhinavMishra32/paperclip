@@ -15,6 +15,115 @@ type FoundryConfig = {
   vercelTeamId?: string;
 };
 
+type FounderCeoMessage = {
+  id: string;
+  companyId: string;
+  agentId: string | null;
+  role: "founder" | "ceo" | "system";
+  body: string;
+  status: "queued" | "running" | "completed" | "failed";
+  runId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ChatRun = { id: string; status: string; summary: string | null; error: string | null };
+
+function chatTable(ctx: PluginContext) {
+  return `${ctx.db.namespace}.founder_ceo_messages`;
+}
+
+function chatText(value: string | null | undefined, maxLength = 8_000) {
+  const text = value?.trim() ?? "";
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+async function listFounderCeoMessages(ctx: PluginContext, companyId: string): Promise<FounderCeoMessage[]> {
+  return await ctx.db.query<FounderCeoMessage>(
+    `SELECT id, company_id AS "companyId", agent_id AS "agentId", role, body, status,
+            run_id AS "runId", error, created_at::text AS "createdAt", updated_at::text AS "updatedAt"
+       FROM ${chatTable(ctx)}
+      WHERE company_id = $1
+      ORDER BY created_at ASC
+      LIMIT 100`,
+    [companyId],
+  );
+}
+
+async function createFounderCeoMessage(ctx: PluginContext, input: {
+  id: string;
+  companyId: string;
+  agentId: string | null;
+  role: FounderCeoMessage["role"];
+  body?: string;
+  status: FounderCeoMessage["status"];
+}) {
+  await ctx.db.execute(
+    `INSERT INTO ${chatTable(ctx)} (id, company_id, agent_id, role, body, status)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [input.id, input.companyId, input.agentId, input.role, chatText(input.body), input.status],
+  );
+}
+
+async function attachFounderCeoRun(ctx: PluginContext, messageId: string, runId: string) {
+  await ctx.db.execute(
+    `UPDATE ${chatTable(ctx)}
+        SET run_id = $1, status = 'running', updated_at = now()
+      WHERE id = $2`,
+    [runId, messageId],
+  );
+}
+
+async function failFounderCeoMessage(ctx: PluginContext, messageId: string, error: unknown) {
+  await ctx.db.execute(
+    `UPDATE ${chatTable(ctx)}
+        SET status = 'failed', error = $1, updated_at = now()
+      WHERE id = $2`,
+    [chatText(error instanceof Error ? error.message : String(error), 2_000), messageId],
+  );
+}
+
+async function reconcileFounderCeoMessages(ctx: PluginContext, companyId: string, runs: ChatRun[]) {
+  const messages = await listFounderCeoMessages(ctx, companyId);
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  for (const message of messages) {
+    if (message.role !== "ceo" || message.status !== "running" || !message.runId) continue;
+    const run = runsById.get(message.runId);
+    if (!run || run.status === "queued" || run.status === "running") continue;
+    const succeeded = run.status === "succeeded";
+    const body = chatText(run.summary) || (succeeded
+      ? "The CEO run completed, but Paperclip did not persist a response summary. Open the linked run for its raw output."
+      : "");
+    const error = succeeded ? null : chatText(run.error) || `CEO run ended with status: ${run.status}.`;
+    await ctx.db.execute(
+      `UPDATE ${chatTable(ctx)}
+          SET body = $1, status = $2, error = $3, updated_at = now()
+        WHERE id = $4`,
+      [body, succeeded ? "completed" : "failed", error, message.id],
+    );
+    message.body = body;
+    message.status = succeeded ? "completed" : "failed";
+    message.error = error;
+  }
+  return messages;
+}
+
+function founderConversationPrompt(messages: FounderCeoMessage[]) {
+  const transcript = messages
+    .filter((message) => message.status === "completed" && message.body)
+    .slice(-12)
+    .map((message) => `${message.role === "founder" ? "Founder" : "CEO"}: ${message.body}`)
+    .join("\n\n");
+  return [
+    "You are the CEO speaking directly to the founder through Foundry.",
+    "Use only evidence from Paperclip and the tools actually granted to this run. Never invent progress, metrics, deployments, customers, or tool results.",
+    "If the founder asks for work, follow Paperclip policy, execute or delegate only what is in scope, and state the evidence and next action clearly.",
+    transcript ? `Conversation so far:\n${transcript}` : "This is the first founder message in this conversation.",
+    "CEO:",
+  ].join("\n\n");
+}
+
 function companyIdFrom(params: Record<string, unknown>): string {
   const companyId = typeof params.companyId === "string" ? params.companyId : "";
   if (!companyId) throw new Error("companyId is required");
@@ -88,6 +197,7 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
   const failedRuns = runs.filter((run) => run.status === "failed");
   const runningRuns = runs.filter((run) => run.status === "running" || run.status === "queued");
   const connectedOpenCodeAgents = agents.filter((agent) => agent.adapterType === "opencode_local");
+  const chatMessages = await reconcileFounderCeoMessages(ctx, companyId, runs);
 
   const honestRead: string[] = [];
   if (!goals.some((goal) => goal.status === "active")) honestRead.push("No active company goal is set.");
@@ -109,6 +219,7 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
     activity,
     runs,
     runEvents,
+    chatMessages,
     workspaces,
     documents: documentCounts.flatMap((entry) => entry.documents.map((document) => ({ ...document, issueId: entry.issueId, issueIdentifier: entry.issueIdentifier, issueTitle: entry.issueTitle }))),
     integrations: integrationStatus(config),
@@ -251,16 +362,27 @@ const plugin = definePlugin({
       const ceo = agents.find((agent) => agent.role === "ceo")
         ?? agents.find((agent) => agent.name.trim().toLowerCase() === "ceo");
       if (!ceo) throw new Error("No CEO agent is configured");
-      const existing = await ctx.agents.sessions.list(ceo.id, companyId);
-      const session = existing[0] ?? await ctx.agents.sessions.create(ceo.id, companyId, { reason: "foundry_founder_chat" });
-      const channel = `founder-chat:${ceo.id}`;
-      ctx.streams.open(channel, companyId);
-      const sent = await ctx.agents.sessions.sendMessage(session.sessionId, companyId, {
-        prompt,
-        reason: "foundry_founder_chat",
-        onEvent: (event) => ctx.streams.emit(channel, { type: event.eventType, stream: event.stream, text: event.message ?? "", runId: event.runId }),
-      });
-      return { ...sent, sessionId: session.sessionId, agentId: ceo.id };
+      const founderMessageId = crypto.randomUUID();
+      const ceoMessageId = crypto.randomUUID();
+      await createFounderCeoMessage(ctx, { id: founderMessageId, companyId, agentId: null, role: "founder", body: prompt, status: "completed" });
+      await createFounderCeoMessage(ctx, { id: ceoMessageId, companyId, agentId: ceo.id, role: "ceo", status: "queued" });
+      try {
+        const existing = await ctx.agents.sessions.list(ceo.id, companyId);
+        const session = existing[0] ?? await ctx.agents.sessions.create(ceo.id, companyId, { reason: "foundry_founder_chat" });
+        const channel = `founder-chat:${ceo.id}`;
+        ctx.streams.open(channel, companyId);
+        const history = await listFounderCeoMessages(ctx, companyId);
+        const sent = await ctx.agents.sessions.sendMessage(session.sessionId, companyId, {
+          prompt: founderConversationPrompt(history),
+          reason: "foundry_founder_chat",
+          onEvent: (event) => ctx.streams.emit(channel, { type: event.eventType, stream: event.stream, text: event.message ?? "", runId: event.runId }),
+        });
+        await attachFounderCeoRun(ctx, ceoMessageId, sent.runId);
+        return { ...sent, sessionId: session.sessionId, agentId: ceo.id, messageId: ceoMessageId };
+      } catch (error) {
+        await failFounderCeoMessage(ctx, ceoMessageId, error);
+        throw error;
+      }
     });
 
     registerTools(ctx);

@@ -742,6 +742,10 @@ export interface PluginRunActivity {
   finishedAt: string | null;
   createdAt: string;
   errorCode: string | null;
+  /** Adapter-provided final summary, truncated by the host for safe UI use. */
+  summary: string | null;
+  /** Persisted terminal error when the run failed. */
+  error: string | null;
   stdoutExcerpt: string | null;
   stderrExcerpt: string | null;
   logBytes: number | null;

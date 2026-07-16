@@ -11,12 +11,13 @@ type Agent = { id: string; name: string; role: string; title: string | null; sta
 type Issue = { id: string; identifier: string | null; title: string; status: string; priority: string; assigneeAgentId: string | null; updatedAt: string };
 type Project = { id: string; name: string; status: string };
 type Goal = { id: string; title: string; status: string; description: string | null };
-type Run = { id: string; agentId: string; status: string; invocationSource: string; startedAt: string | null; finishedAt: string | null; createdAt: string; errorCode: string | null; stdoutExcerpt: string | null; stderrExcerpt: string | null };
+type Run = { id: string; agentId: string; status: string; invocationSource: string; startedAt: string | null; finishedAt: string | null; createdAt: string; errorCode: string | null; summary: string | null; error: string | null; stdoutExcerpt: string | null; stderrExcerpt: string | null };
 type RunEvent = { id: number; runId: string; agentId: string; seq: number; eventType: string; stream: string | null; level: string | null; message: string | null; createdAt: string };
 type Activity = { id: string; actorType: string; actorId: string; action: string; agentId: string | null; entityType: string; entityId: string; createdAt: string; details: Record<string, unknown> | null };
 type Workspace = { id: string; name: string; projectName: string; path: string; repoUrl: string | null; isPrimary: boolean };
 type Document = { id: string; key: string; title: string | null; issueIdentifier: string | null; issueTitle: string; updatedAt: string };
 type Integration = { configured: boolean; url?: string | null; projectConfigured?: boolean };
+type FounderCeoMessage = { id: string; agentId: string | null; role: "founder" | "ceo" | "system"; body: string; status: "queued" | "running" | "completed" | "failed"; runId: string | null; error: string | null; createdAt: string; updatedAt: string };
 type Snapshot = {
   generatedAt: string;
   company: Company;
@@ -29,6 +30,7 @@ type Snapshot = {
   activity: Activity[];
   runs: Run[];
   runEvents: RunEvent[];
+  chatMessages: FounderCeoMessage[];
   workspaces: Workspace[];
   documents: Document[];
   integrations: { website: Integration; stripe: Integration; vercel: Integration; analytics: Integration; email: Integration };
@@ -47,7 +49,7 @@ const css = `
   .fc-buttons{display:flex;flex-wrap:wrap;gap:9px}.fc button,.fc-btn{font:700 12px Inter,ui-sans-serif,sans-serif;color:#334155;background:#fff;border:1px solid #dbe3ee;border-radius:10px;padding:10px 14px;cursor:pointer;text-decoration:none;transition:.18s ease}.fc button:hover,.fc-btn:hover{border-color:#b8c2d1;transform:translateY(-1px);box-shadow:0 6px 16px rgba(15,23,42,.08)}.fc button:disabled{opacity:.45;cursor:not-allowed;transform:none}.fc button.primary,.fc button.run{background:var(--fc-accent);border-color:var(--fc-accent);color:#fff}.fc button.run{background:#111827;border-color:#111827}
   .fc-kicker,.fc-eyebrow{text-transform:uppercase;letter-spacing:.09em;color:#94a3b8;font-size:10px;font-weight:800}.fc-big{font-size:54px;font-weight:760;letter-spacing:-.06em;margin:4px 0}.fc-meter{height:8px;border-radius:99px;background:#e8edf4;overflow:hidden}.fc-meter span{display:block;height:100%;background:linear-gradient(90deg,var(--fc-accent),var(--fc-cyan));border-radius:inherit}.fc-rule{border:0;border-top:1px solid var(--fc-line);margin:17px 0}.fc-muted{color:var(--fc-muted)}.fc-error{color:var(--fc-red)}
   .fc-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--fc-line);font-size:13px}.fc-row:last-child{border:0}.fc-tag{border:1px solid #dbe3ee;background:#f8fafc;color:#475569;border-radius:999px;padding:4px 8px;font-size:9px;font-weight:800;text-transform:uppercase;white-space:nowrap}.fc-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--fc-cyan);margin-right:9px;box-shadow:0 0 0 3px rgba(20,184,166,.1)}.fc-dot.off{background:#94a3b8;box-shadow:none}.fc-money{font-size:45px;font-weight:750;letter-spacing:-.055em}.fc-card{border:1px solid var(--fc-line);background:#f8fafc;border-radius:12px;padding:14px;margin-top:10px}.fc-site{font-size:14px;font-weight:700;overflow-wrap:anywhere}.fc-site a{color:var(--fc-accent);text-decoration:none}.fc-site-frame{height:220px;border:1px solid var(--fc-line);border-radius:13px;margin-top:15px;background:#fff;overflow:hidden}.fc-site-frame iframe{width:100%;height:100%;border:0}
-  .fc-honest{padding:26px 25px;min-height:430px}.fc-honest h2{font-size:25px;letter-spacing:-.04em;margin:7px 0 20px}.fc-honest ul,.fc-honest ol{padding-left:20px;margin:0 0 28px}.fc-honest li{font-size:14px;line-height:1.55;margin-bottom:11px;color:#334155}.fc-compose{border-top:1px solid var(--fc-line);padding:18px;background:#fafbff}.fc-compose textarea{width:100%;min-height:96px;border:1px solid var(--fc-line);border-radius:12px;background:#fff;resize:vertical;font:14px/1.5 Inter,ui-sans-serif,sans-serif;outline:0;padding:12px;margin:10px 0}.fc-compose textarea:focus{border-color:#a5b4fc;box-shadow:0 0 0 3px var(--fc-accent-soft)}.fc-compose-actions{display:flex;align-items:center;justify-content:space-between}.fc-note{font-size:10px;line-height:1.45;color:#94a3b8}
+  .fc-chat-head{padding:22px 22px 14px;border-bottom:1px solid var(--fc-line)}.fc-chat-head h2{font-size:22px;letter-spacing:-.04em;margin:5px 0}.fc-chat{display:grid;gap:12px;max-height:520px;overflow:auto;padding:18px 18px 8px;background:linear-gradient(180deg,#fff,#fafbff)}.fc-message{display:grid;gap:5px;max-width:92%}.fc-message.founder{justify-self:end}.fc-message.ceo,.fc-message.system{justify-self:start}.fc-message-meta{font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#94a3b8}.fc-message.founder .fc-message-meta{text-align:right}.fc-bubble{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--fc-line);border-radius:14px;padding:11px 12px;font-size:13px;line-height:1.5;background:#fff;color:#334155}.fc-message.founder .fc-bubble{background:var(--fc-accent);border-color:var(--fc-accent);color:#fff;border-bottom-right-radius:4px}.fc-message.ceo .fc-bubble{border-bottom-left-radius:4px}.fc-chat-state{font-size:11px;color:#64748b}.fc-chat-state.failed{color:var(--fc-red)}.fc-compose{border-top:1px solid var(--fc-line);padding:18px;background:#fafbff}.fc-compose textarea{width:100%;min-height:96px;border:1px solid var(--fc-line);border-radius:12px;background:#fff;resize:vertical;font:14px/1.5 Inter,ui-sans-serif,sans-serif;outline:0;padding:12px;margin:10px 0}.fc-compose textarea:focus{border-color:#a5b4fc;box-shadow:0 0 0 3px var(--fc-accent-soft)}.fc-compose-actions{display:flex;align-items:center;justify-content:space-between}.fc-note{font-size:10px;line-height:1.45;color:#94a3b8}
   .fc-empty{color:var(--fc-muted);padding:8px 0;font-size:13px;line-height:1.5}.fc-loading{min-height:70vh;display:grid;place-items:center;font:600 16px Inter,system-ui;background:var(--fc-bg)}
   @media(max-width:1180px){.fc-layout{grid-template-columns:1fr 1fr}.fc-side{grid-column:1/-1;position:static}.fc-honest{min-height:auto}}@media(max-width:760px){.fc{margin:-16px}.fc-layout{grid-template-columns:1fr;padding:14px}.fc-top{padding:12px 14px;flex-wrap:wrap}.fc-updated{display:none}.fc-company{font-size:18px}.fc-log{grid-template-columns:42px 68px 1fr}.fc-pre{margin-left:0}.fc-terminal-title small{display:none}}
 `;
@@ -61,7 +63,9 @@ function Empty({ children }: { children: React.ReactNode }) { return <div classN
 export function ControlRoomPage({ context }: PluginPageProps) {
   const companyId = context.companyId ?? "";
   const navigation = useHostNavigation();
-  const { data, loading, error, refresh } = usePluginData<Snapshot>("control-room", { companyId });
+  const { data: fetchedData, loading, error, refresh } = usePluginData<Snapshot>("control-room", { companyId });
+  const [lastData, setLastData] = useState<Snapshot | null>(null);
+  const data = fetchedData ?? (lastData?.company.id === companyId ? lastData : null);
   const invokeCeo = usePluginAction("invoke-ceo");
   const askCeo = usePluginAction("ask-ceo");
   const [busy, setBusy] = useState<"run" | "chat" | null>(null);
@@ -69,6 +73,10 @@ export function ControlRoomPage({ context }: PluginPageProps) {
   const [prompt, setPrompt] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (fetchedData) setLastData(fetchedData);
+  }, [fetchedData]);
 
   useEffect(() => {
     let active = true;
@@ -118,11 +126,11 @@ export function ControlRoomPage({ context }: PluginPageProps) {
   async function send() {
     const value = prompt.trim(); if (!value) return;
     setBusy("chat"); setActionError(null);
-    try { await askCeo({ companyId, prompt: value }); setPrompt(""); } catch (err) { setActionError(err instanceof Error ? err.message : String(err)); } finally { setBusy(null); }
+    try { await askCeo({ companyId, prompt: value }); setPrompt(""); await refresh(); } catch (err) { setActionError(err instanceof Error ? err.message : String(err)); } finally { setBusy(null); }
   }
 
-  if (loading) return <><style>{css}</style><main className="fc-loading">Loading live company state…</main></>;
-  if (error || !data) return <><style>{css}</style><main className="fc-loading fc-error">Foundry could not load live data: {error?.message ?? "No company data returned"}</main></>;
+  if (loading && !data) return <><style>{css}</style><main className="fc-loading">Loading live company state…</main></>;
+  if (!data) return <><style>{css}</style><main className="fc-loading fc-error">Foundry could not load live data: {error?.message ?? "No company data returned"}</main></>;
   const spentRatio = data.company.budgetMonthlyCents > 0 ? Math.min(100, (data.company.spentMonthlyCents / data.company.budgetMonthlyCents) * 100) : 0;
   const activeGoal = data.goals.find((goal) => goal.status === "active");
   const settingsPath = "/company/settings/instance/plugins";
@@ -147,7 +155,7 @@ export function ControlRoomPage({ context }: PluginPageProps) {
         <Panel title="Project workspaces">{data.workspaces.map((workspace) => <div className="fc-card" key={workspace.id}><strong>{workspace.projectName} / {workspace.name}</strong><p className="fc-muted">{workspace.repoUrl ?? workspace.path}</p><span className="fc-tag">{workspace.isPrimary ? "primary" : "workspace"}</span></div>)}{data.workspaces.length === 0 && <Empty>No project workspaces configured. Agents cannot reliably build without one.</Empty>}</Panel>
       </div>
       <aside className="fc-col fc-side">
-        <section className="fc-panel"><div className="fc-honest"><span className="fc-eyebrow">Operating brief</span><h2>What needs attention</h2><ul>{data.honestRead.map((item) => <li key={item}>{item}</li>)}</ul><span className="fc-eyebrow">Recommended next moves</span><ol>{!activeGoal && <li>Set one active company goal.</li>}{data.counts.failedRuns > 0 && <li>Open the failed runs and fix the first repeated failure.</li>}{data.workspaces.length === 0 && <li>Bind a real git project workspace.</li>}{!data.integrations.website.configured && <li>Configure the deployed website URL.</li>}<li>Ask the CEO to choose and execute the highest-impact evidence-backed action.</li></ol></div><div className="fc-compose"><div className="fc-kicker">Message the CEO</div><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={data.ceo ? `Message ${data.ceo.name}…` : "No CEO configured"} disabled={!data.ceo || busy !== null}/><div className="fc-compose-actions"><span className="fc-note">Uses a real agent session</span><button className="primary" onClick={() => void send()} disabled={!data.ceo || !prompt.trim() || busy !== null}>{busy === "chat" ? "Sending…" : "Send"}</button></div></div></section>
+        <section className="fc-panel"><div className="fc-chat-head"><span className="fc-eyebrow">Founder channel</span><h2>{data.ceo ? `Chat with ${data.ceo.name}` : "CEO unavailable"}</h2><span className="fc-note">Messages and run outcomes are stored in this company. Replies are real CEO-run summaries.</span></div><div className="fc-chat">{data.chatMessages.length === 0 ? <Empty>Start a conversation with your CEO. The reply will appear here once the real agent run completes.</Empty> : data.chatMessages.map((message) => <div className={`fc-message ${message.role}`} key={message.id}><span className="fc-message-meta">{message.role === "founder" ? "You" : message.role === "ceo" ? data.ceo?.name ?? "CEO" : "System"} · {when(message.createdAt)}</span>{message.body && <div className="fc-bubble">{message.body}</div>}{message.status === "queued" || message.status === "running" ? <span className="fc-chat-state">CEO run {message.status}…</span> : null}{message.error ? <span className="fc-chat-state failed">{message.error}</span> : null}</div>)}</div><div className="fc-compose"><div className="fc-kicker">Message the CEO</div><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={data.ceo ? `Message ${data.ceo.name}…` : "No CEO configured"} disabled={!data.ceo || busy !== null}/><div className="fc-compose-actions"><span className="fc-note">Starts a real Paperclip CEO run</span><button className="primary" onClick={() => void send()} disabled={!data.ceo || !prompt.trim() || busy !== null}>{busy === "chat" ? "Sending…" : "Send"}</button></div></div></section>
       </aside>
     </div>
   </main></>;

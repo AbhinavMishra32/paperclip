@@ -1276,6 +1276,12 @@ export function buildHostServices(
           finishedAt: heartbeatRuns.finishedAt,
           createdAt: heartbeatRuns.createdAt,
           errorCode: heartbeatRuns.errorCode,
+          summary: sql<string | null>`coalesce(
+            nullif(${heartbeatRuns.resultJson} ->> 'summary', ''),
+            nullif(${heartbeatRuns.resultJson} ->> 'result', ''),
+            nullif(${heartbeatRuns.resultJson} ->> 'message', '')
+          )`.as("summary"),
+          error: heartbeatRuns.error,
           stdoutExcerpt: heartbeatRuns.stdoutExcerpt,
           stderrExcerpt: heartbeatRuns.stderrExcerpt,
           logBytes: heartbeatRuns.logBytes,
