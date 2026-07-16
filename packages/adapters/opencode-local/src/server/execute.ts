@@ -57,6 +57,20 @@ import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
+export function applyLocalOpenCodeStateIsolation(
+  env: Record<string, string>,
+  agentId: string,
+): Record<string, string> {
+  const safeAgentId = agentId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const stateRoot = path.join(os.tmpdir(), "paperclip-opencode", safeAgentId);
+  return {
+    ...env,
+    XDG_DATA_HOME: env.XDG_DATA_HOME?.trim() || path.join(stateRoot, "data"),
+    XDG_CACHE_HOME: env.XDG_CACHE_HOME?.trim() || path.join(stateRoot, "cache"),
+    XDG_STATE_HOME: env.XDG_STATE_HOME?.trim() || path.join(stateRoot, "state"),
+  };
+}
+
 function firstNonEmptyLine(text: string): string {
   return (
     text
@@ -351,6 +365,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     executionTargetIsRemote,
     executionCwd: effectiveExecutionCwd,
   });
+  if (!executionTargetIsRemote) {
+    Object.assign(env, applyLocalOpenCodeStateIsolation(env, agent.id));
+  }
   // Prevent OpenCode from writing an opencode.json config file into the
   // project working directory (which would pollute the git repo).  Model
   // selection is already handled via the --model CLI flag.  Set after the
