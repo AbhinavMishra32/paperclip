@@ -418,7 +418,7 @@ async function deployWithVercelCli(
   if (config.vercelTeamId) env.VERCEL_ORG_ID = config.vercelTeamId;
   const result = await execFileAsync(
     "npx",
-    ["--yes", "vercel@56.2.1", "deploy", "--prod", "--yes", "--non-interactive", "--archive=tgz"],
+    ["--yes", "vercel@56.2.1", "deploy", "--prod", "--yes", "--non-interactive", "--no-wait", "--archive=tgz"],
     { cwd: workspacePath, env, timeout: 15 * 60_000, maxBuffer: 4_000_000 },
   );
   const deploymentUrl = result.stdout
@@ -651,7 +651,7 @@ function registerTools(ctx: PluginContext) {
 
   ctx.tools.register(TOOL_NAMES.deployProject, {
     displayName: "Deploy project",
-    description: "Push the committed project workspace, deploy it to the configured Vercel project, and return the real production result.",
+    description: "Push the committed project workspace, start a production deployment in the configured Vercel project, and return its real initial state. Poll get_vercel_deployments until READY or ERROR.",
     parametersSchema: { type: "object", properties: {} },
   }, async (_raw, runCtx): Promise<ToolResult> => {
     const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.deployProject);
@@ -668,7 +668,7 @@ function registerTools(ctx: PluginContext) {
       const deployment = deployments.find((entry) => entry.url === deploymentUrl) ?? null;
       await ctx.activity.log({ companyId: runCtx.companyId, message: `Deployed ${sha.slice(0, 12)} to Vercel production`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, sha, branch, deploymentUrl, deployment } });
       const result: ToolResult = {
-        content: `Pushed ${sha}. Vercel production deployment is available at ${deploymentUrl}${deployment ? ` with state ${String(deployment.state)}` : ""}.`,
+        content: `Pushed ${sha}. Started Vercel production deployment at ${deploymentUrl}${deployment ? ` with initial state ${String(deployment.state)}` : ""}. Poll get_vercel_deployments until it reaches READY or ERROR.`,
         data: { sha, branch, deploymentUrl, deployment },
       };
       return await finishToolEvent(ctx, eventId, result, { sha, branch, deployment });
