@@ -11,6 +11,7 @@ export const TOOL_NAMES = {
   createStripePaymentLink: "create_stripe_payment_link",
   provisionVercelSecret: "provision_vercel_secret",
   checkOpenRouter: "check_openrouter_connection",
+  provisionDatabase: "provision_database",
   provisionAppEnvironment: "provision_app_environment",
   listDeployments: "get_vercel_deployments",
   deploymentEvents: "get_vercel_deployment_events",
@@ -235,6 +236,17 @@ const manifest: PaperclipPluginManifestV1 = {
       displayName: "Check OpenRouter connection",
       description: "Verify the company OpenRouter credential and Laguna model availability without revealing the credential.",
       parametersSchema: { type: "object", properties: {} },
+    },
+    {
+      name: TOOL_NAMES.provisionDatabase,
+      displayName: "Provision application database",
+      description: "Provision a real Neon Postgres database through Vercel Marketplace, connect it to the existing project, and run the committed db:migrate script without revealing credentials.",
+      parametersSchema: {
+        type: "object",
+        properties: {
+          region: { type: "string", enum: ["cle1", "iad1", "pdx1", "fra1", "lhr1", "syd1", "sin1", "gru1"] },
+        },
+      },
     },
     {
       name: TOOL_NAMES.provisionAppEnvironment,

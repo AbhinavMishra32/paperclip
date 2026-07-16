@@ -21,6 +21,7 @@ describe("Foundry Control Room", () => {
       "create_stripe_payment_link",
       "provision_vercel_secret",
       "check_openrouter_connection",
+      "provision_database",
       "provision_app_environment",
       "get_vercel_deployments",
       "deploy_project",

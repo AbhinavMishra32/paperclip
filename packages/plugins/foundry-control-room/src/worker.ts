@@ -6,7 +6,7 @@ import {
   type ToolResult,
 } from "@paperclipai/plugin-sdk";
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { TOOL_NAMES } from "./manifest.js";
@@ -19,8 +19,8 @@ const namespacedTool = (name: string) => `tool:foundry.control-room:${name}`;
 
 const ROLE_TOOL_NAMES: Record<string, string[]> = {
   ceo: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments],
-  "engineering-manager": [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents, TOOL_NAMES.deployProject],
-  cto: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents, TOOL_NAMES.deployProject],
+  "engineering-manager": [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionDatabase, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents, TOOL_NAMES.deployProject],
+  cto: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionDatabase, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents, TOOL_NAMES.deployProject],
   qa: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments, TOOL_NAMES.deploymentEvents],
   growth: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.listDeployments, TOOL_NAMES.publishBlog],
 };
@@ -445,6 +445,16 @@ async function deployWithVercelCli(
   throw new Error("Vercel accepted the deploy command, but no new production deployment could be identified");
 }
 
+function parsePulledEnvValue(source: string, key: string) {
+  const line = source.split(/\r?\n/).find((entry) => entry.startsWith(`${key}=`));
+  if (!line) return null;
+  const raw = line.slice(key.length + 1);
+  if (raw.startsWith('"') && raw.endsWith('"')) {
+    try { return JSON.parse(raw) as string; } catch { return raw.slice(1, -1); }
+  }
+  return raw;
+}
+
 async function provisionVercelEnv(
   ctx: PluginContext,
   companyId: string,
@@ -617,6 +627,83 @@ function registerTools(ctx: PluginContext) {
         : { error: `OpenRouter connected, but ${LAGUNA_MODEL} was not present in the model catalog.` };
       return await finishToolEvent(ctx, eventId, result, { model: LAGUNA_MODEL });
     } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
+
+  ctx.tools.register(TOOL_NAMES.provisionDatabase, {
+    displayName: "Provision application database",
+    description: "Provision Vercel-reachable Neon Postgres for the existing project and run its committed db:migrate script. Credentials remain inside the governed tool.",
+    parametersSchema: { type: "object", properties: { region: { type: "string", enum: ["cle1", "iad1", "pdx1", "fra1", "lhr1", "syd1", "sin1", "gru1"] } } },
+  }, async (raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.provisionDatabase);
+    let envFile: string | null = null;
+    try {
+      const region = String((raw as { region?: unknown }).region ?? "sin1");
+      const allowedRegions = new Set(["cle1", "iad1", "pdx1", "fra1", "lhr1", "syd1", "sin1", "gru1"]);
+      if (!allowedRegions.has(region)) return await finishToolEvent(ctx, eventId, { error: "Unsupported Neon region" });
+      const config = await getConfig(ctx, runCtx.companyId);
+      if (!isSecretRef(config.vercelToken) || !config.vercelProjectId) {
+        return await finishToolEvent(ctx, eventId, { error: "Vercel token and project ID are not configured in Foundry settings" });
+      }
+      const { workspace } = await resolveWorkspace(ctx, runCtx);
+      const packageJson = JSON.parse(await readFile(join(workspace.path, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+      if (!packageJson.scripts?.["db:migrate"]) {
+        return await finishToolEvent(ctx, eventId, { error: "Database provisioning refused: the project must first commit a db:migrate script." });
+      }
+      const token = await ctx.secrets.resolve(config.vercelToken, { companyId: runCtx.companyId, configPath: "vercelToken" });
+      const runtimeRoot = `/tmp/foundry-vercel/${runCtx.runId}/database`;
+      await mkdir(runtimeRoot, { recursive: true });
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: runtimeRoot,
+        NO_COLOR: "1",
+        npm_config_cache: `${runtimeRoot}/npm-cache`,
+        VERCEL_TOKEN: token,
+        VERCEL_PROJECT_ID: config.vercelProjectId,
+      };
+      if (config.vercelTeamId) env.VERCEL_ORG_ID = config.vercelTeamId;
+      const resourceName = `foundry-${runCtx.companyId.slice(0, 8)}`;
+      await execFileAsync("npx", [
+        "--yes", "vercel@56.2.1", "integration", "add", "neon",
+        "--name", resourceName,
+        "--metadata", `region=${region}`,
+        "--metadata", "auth=false",
+        "--environment", "production",
+        "--environment", "preview",
+        "--environment", "development",
+        "--format", "json",
+        "--non-interactive",
+        "--no-env-pull",
+      ], { cwd: workspace.path, env, timeout: 15 * 60_000, maxBuffer: 4_000_000 });
+
+      envFile = join(runtimeRoot, ".env.production.local");
+      await execFileAsync("npx", [
+        "--yes", "vercel@56.2.1", "env", "pull", envFile,
+        "--environment", "production", "--yes", "--token", token,
+      ], { cwd: workspace.path, env, timeout: 5 * 60_000, maxBuffer: 2_000_000 });
+      const databaseUrl = parsePulledEnvValue(await readFile(envFile, "utf8"), "DATABASE_URL");
+      if (!databaseUrl) throw new Error("Neon was provisioned, but Vercel did not expose DATABASE_URL to the project");
+      await execFileAsync("pnpm", ["run", "db:migrate"], {
+        cwd: workspace.path,
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+        timeout: 10 * 60_000,
+        maxBuffer: 2_000_000,
+      });
+      await ctx.activity.log({
+        companyId: runCtx.companyId,
+        message: "Provisioned Vercel Marketplace Postgres and applied committed migrations",
+        entityType: "agent",
+        entityId: runCtx.agentId,
+        metadata: { runId: runCtx.runId, projectId: config.vercelProjectId, provider: "neon", region, resourceName },
+      });
+      return await finishToolEvent(ctx, eventId, {
+        content: `Provisioned Neon Postgres in ${region}, connected it to the existing Vercel project, and successfully ran db:migrate. DATABASE_URL is managed by Vercel and was not disclosed.`,
+        data: { provider: "neon", region, resourceName, projectId: config.vercelProjectId, migrationsApplied: true },
+      }, { provider: "neon", region, resourceName, projectId: config.vercelProjectId, migrationsApplied: true });
+    } catch (error) {
+      return await failToolEvent(ctx, eventId, error);
+    } finally {
+      if (envFile) await unlink(envFile).catch(() => undefined);
+    }
   });
 
   ctx.tools.register(TOOL_NAMES.provisionAppEnvironment, {
