@@ -386,10 +386,18 @@ async function matchingDeployment(ctx: PluginContext, companyId: string, config:
   return null;
 }
 
-async function provisionVercelEnv(ctx: PluginContext, companyId: string, config: FoundryConfig, key: string, ref: EnvSecretRefBinding, target: string[]) {
+async function provisionVercelEnv(
+  ctx: PluginContext,
+  companyId: string,
+  config: FoundryConfig,
+  key: string,
+  ref: EnvSecretRefBinding,
+  configPath: keyof Pick<FoundryConfig, "openrouterApiKey" | "databaseUrl" | "authSecret" | "stripeSecretKey">,
+  target: string[],
+) {
   if (!isSecretRef(config.vercelToken) || !config.vercelProjectId) throw new Error("Vercel token and project ID are not configured");
   const [value, token] = await Promise.all([
-    ctx.secrets.resolve(ref, { companyId, configPath: key }),
+    ctx.secrets.resolve(ref, { companyId, configPath }),
     ctx.secrets.resolve(config.vercelToken, { companyId, configPath: "vercelToken" }),
   ]);
   const query = new URLSearchParams({ upsert: "true" });
@@ -414,7 +422,8 @@ async function applyRoleToolGrants(ctx: PluginContext, companyId: string) {
       .map((grant) => ({ permissionKey: grant.permissionKey, scope: grant.scope }));
     const previousToolGrant = existing.find((grant) => grant.permissionKey === "tools:use");
     const previousAllow = previousToolGrant?.scope && Array.isArray(previousToolGrant.scope.allow)
-      ? previousToolGrant.scope.allow.filter((entry): entry is string => typeof entry === "string")
+      ? previousToolGrant.scope.allow.filter((entry): entry is string =>
+          typeof entry === "string" && !entry.startsWith("foundry.control-room:"))
       : [];
     const allow = [...new Set([...previousAllow, ...toolNames.map(namespacedTool)])];
     await ctx.authorization.grants.set({
@@ -564,17 +573,20 @@ function registerTools(ctx: PluginContext) {
       const variables = Array.isArray(input.variables) ? [...new Set(input.variables.filter((entry): entry is string => typeof entry === "string"))] : [];
       if (target.length === 0 || variables.length === 0) return await finishToolEvent(ctx, eventId, { error: "At least one approved variable and target are required" });
       const config = await getConfig(ctx, runCtx.companyId);
-      const refs: Record<string, EnvSecretRefBinding | undefined> = {
-        OPENROUTER_API_KEY: isSecretRef(config.openrouterApiKey) ? config.openrouterApiKey : undefined,
-        DATABASE_URL: isSecretRef(config.databaseUrl) ? config.databaseUrl : undefined,
-        AUTH_SECRET: isSecretRef(config.authSecret) ? config.authSecret : undefined,
-        STRIPE_SECRET_KEY: isSecretRef(config.stripeSecretKey) ? config.stripeSecretKey : undefined,
+      const refs: Record<string, { ref: EnvSecretRefBinding; configPath: "openrouterApiKey" | "databaseUrl" | "authSecret" | "stripeSecretKey" } | undefined> = {
+        OPENROUTER_API_KEY: isSecretRef(config.openrouterApiKey) ? { ref: config.openrouterApiKey, configPath: "openrouterApiKey" } : undefined,
+        DATABASE_URL: isSecretRef(config.databaseUrl) ? { ref: config.databaseUrl, configPath: "databaseUrl" } : undefined,
+        AUTH_SECRET: isSecretRef(config.authSecret) ? { ref: config.authSecret, configPath: "authSecret" } : undefined,
+        STRIPE_SECRET_KEY: isSecretRef(config.stripeSecretKey) ? { ref: config.stripeSecretKey, configPath: "stripeSecretKey" } : undefined,
       };
       const invalid = variables.filter((key) => !Object.hasOwn(refs, key));
       const missing = variables.filter((key) => !refs[key]);
       if (invalid.length > 0) return await finishToolEvent(ctx, eventId, { error: `Unsupported variables: ${invalid.join(", ")}` });
       if (missing.length > 0) return await finishToolEvent(ctx, eventId, { error: `Company secrets are not configured for: ${missing.join(", ")}` });
-      for (const key of variables) await provisionVercelEnv(ctx, runCtx.companyId, config, key, refs[key]!, target);
+      for (const key of variables) {
+        const binding = refs[key]!;
+        await provisionVercelEnv(ctx, runCtx.companyId, config, key, binding.ref, binding.configPath, target);
+      }
       await ctx.activity.log({ companyId: runCtx.companyId, message: `Provisioned ${variables.join(", ")} to Vercel`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, variables, target, projectId: config.vercelProjectId } });
       return await finishToolEvent(ctx, eventId, { content: `Provisioned ${variables.join(", ")} to ${target.join(", ")}.`, data: { variables, target, projectId: config.vercelProjectId } }, { variables, target, projectId: config.vercelProjectId });
     } catch (error) { return await failToolEvent(ctx, eventId, error); }
