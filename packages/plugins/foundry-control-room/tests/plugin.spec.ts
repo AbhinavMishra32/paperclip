@@ -20,8 +20,27 @@ describe("Foundry Control Room", () => {
       "get_integration_status",
       "create_stripe_payment_link",
       "provision_vercel_secret",
+      "check_openrouter_connection",
+      "provision_app_environment",
+      "get_vercel_deployments",
+      "deploy_project",
+      "publish_blog",
     ]));
     expect(manifest.capabilities).toContain("activity.read");
     expect(manifest.capabilities).toContain("agent.tools.register");
+    expect(manifest.capabilities).toContain("authorization.grants.write");
+    expect(manifest.skills?.map((skill) => skill.skillKey)).toEqual(expect.arrayContaining([
+      "ai-feature-integration",
+      "database-auth",
+      "payments",
+      "blog-publishing",
+      "product-design",
+      "deployment",
+      "qa-recovery",
+    ]));
+    expect(manifest.routines?.map((routine) => routine.routineKey)).toEqual(expect.arrayContaining([
+      "weekly-evidence-review",
+      "weekly-blog",
+    ]));
   });
 });

@@ -15,9 +15,10 @@ type Run = { id: string; agentId: string; status: string; invocationSource: stri
 type RunEvent = { id: number; runId: string; agentId: string; seq: number; eventType: string; stream: string | null; level: string | null; message: string | null; createdAt: string };
 type Activity = { id: string; actorType: string; actorId: string; action: string; agentId: string | null; entityType: string; entityId: string; createdAt: string; details: Record<string, unknown> | null };
 type Workspace = { id: string; name: string; projectName: string; path: string; repoUrl: string | null; isPrimary: boolean };
-type Document = { id: string; key: string; title: string | null; issueIdentifier: string | null; issueTitle: string; updatedAt: string };
+type Document = { id: string; key: string; title: string | null; issueId: string; issueIdentifier: string | null; issueTitle: string; updatedAt: string };
 type Integration = { configured: boolean; url?: string | null; projectConfigured?: boolean };
 type FounderCeoMessage = { id: string; agentId: string | null; role: "founder" | "ceo" | "system"; body: string; status: "queued" | "running" | "completed" | "failed"; runId: string | null; error: string | null; createdAt: string; updatedAt: string };
+type ToolEvent = { id: string; agentId: string | null; runId: string | null; toolName: string; status: "running" | "succeeded" | "failed"; summary: string | null; error: string | null; metadata: Record<string, unknown>; createdAt: string; updatedAt: string };
 type Snapshot = {
   generatedAt: string;
   company: Company;
@@ -31,9 +32,11 @@ type Snapshot = {
   runs: Run[];
   runEvents: RunEvent[];
   chatMessages: FounderCeoMessage[];
+  toolEvents: ToolEvent[];
   workspaces: Workspace[];
   documents: Document[];
-  integrations: { website: Integration; stripe: Integration; vercel: Integration; analytics: Integration; email: Integration };
+  integrations: Record<string, Integration>;
+  integrationSettings: { websiteUrl: string; vercelProjectId: string; vercelTeamId: string };
   counts: { activeIssues: number; completedIssues: number; failedRuns: number; activeRuns: number; connectedOpenCodeAgents: number };
   honestRead: string[];
 };
@@ -50,6 +53,7 @@ const css = `
   .fc-kicker,.fc-eyebrow{text-transform:uppercase;letter-spacing:.09em;color:#94a3b8;font-size:10px;font-weight:800}.fc-big{font-size:54px;font-weight:760;letter-spacing:-.06em;margin:4px 0}.fc-meter{height:8px;border-radius:99px;background:#e8edf4;overflow:hidden}.fc-meter span{display:block;height:100%;background:linear-gradient(90deg,var(--fc-accent),var(--fc-cyan));border-radius:inherit}.fc-rule{border:0;border-top:1px solid var(--fc-line);margin:17px 0}.fc-muted{color:var(--fc-muted)}.fc-error{color:var(--fc-red)}
   .fc-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--fc-line);font-size:13px}.fc-row:last-child{border:0}.fc-tag{border:1px solid #dbe3ee;background:#f8fafc;color:#475569;border-radius:999px;padding:4px 8px;font-size:9px;font-weight:800;text-transform:uppercase;white-space:nowrap}.fc-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--fc-cyan);margin-right:9px;box-shadow:0 0 0 3px rgba(20,184,166,.1)}.fc-dot.off{background:#94a3b8;box-shadow:none}.fc-money{font-size:45px;font-weight:750;letter-spacing:-.055em}.fc-card{border:1px solid var(--fc-line);background:#f8fafc;border-radius:12px;padding:14px;margin-top:10px}.fc-site{font-size:14px;font-weight:700;overflow-wrap:anywhere}.fc-site a{color:var(--fc-accent);text-decoration:none}.fc-site-frame{height:220px;border:1px solid var(--fc-line);border-radius:13px;margin-top:15px;background:#fff;overflow:hidden}.fc-site-frame iframe{width:100%;height:100%;border:0}
   .fc-chat-head{padding:22px 22px 14px;border-bottom:1px solid var(--fc-line)}.fc-chat-head h2{font-size:22px;letter-spacing:-.04em;margin:5px 0}.fc-chat{display:grid;gap:12px;max-height:520px;overflow:auto;padding:18px 18px 8px;background:linear-gradient(180deg,#fff,#fafbff)}.fc-message{display:grid;gap:5px;max-width:92%}.fc-message.founder{justify-self:end}.fc-message.ceo,.fc-message.system{justify-self:start}.fc-message-meta{font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#94a3b8}.fc-message.founder .fc-message-meta{text-align:right}.fc-bubble{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--fc-line);border-radius:14px;padding:11px 12px;font-size:13px;line-height:1.5;background:#fff;color:#334155}.fc-message.founder .fc-bubble{background:var(--fc-accent);border-color:var(--fc-accent);color:#fff;border-bottom-right-radius:4px}.fc-message.ceo .fc-bubble{border-bottom-left-radius:4px}.fc-chat-state{font-size:11px;color:#64748b}.fc-chat-state.failed{color:var(--fc-red)}.fc-compose{border-top:1px solid var(--fc-line);padding:18px;background:#fafbff}.fc-compose textarea{width:100%;min-height:96px;border:1px solid var(--fc-line);border-radius:12px;background:#fff;resize:vertical;font:14px/1.5 Inter,ui-sans-serif,sans-serif;outline:0;padding:12px;margin:10px 0}.fc-compose textarea:focus{border-color:#a5b4fc;box-shadow:0 0 0 3px var(--fc-accent-soft)}.fc-compose-actions{display:flex;align-items:center;justify-content:space-between}.fc-note{font-size:10px;line-height:1.45;color:#94a3b8}
+  .fc-fields{display:grid;gap:10px;margin:14px 0}.fc-field{display:grid;gap:5px}.fc-field label{font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.06em}.fc-field input{width:100%;border:1px solid var(--fc-line);border-radius:10px;background:#fff;padding:10px 11px;font:12px Inter,ui-sans-serif,sans-serif;outline:0}.fc-field input:focus{border-color:#a5b4fc;box-shadow:0 0 0 3px var(--fc-accent-soft)}.fc-row[href]{color:inherit;text-decoration:none}.fc-row[href]:hover strong{color:var(--fc-accent)}
   .fc-empty{color:var(--fc-muted);padding:8px 0;font-size:13px;line-height:1.5}.fc-loading{min-height:70vh;display:grid;place-items:center;font:600 16px Inter,system-ui;background:var(--fc-bg)}
   @media(max-width:1180px){.fc-layout{grid-template-columns:1fr 1fr}.fc-side{grid-column:1/-1;position:static}.fc-honest{min-height:auto}}@media(max-width:760px){.fc{margin:-16px}.fc-layout{grid-template-columns:1fr;padding:14px}.fc-top{padding:12px 14px;flex-wrap:wrap}.fc-updated{display:none}.fc-company{font-size:18px}.fc-log{grid-template-columns:42px 68px 1fr}.fc-pre{margin-left:0}.fc-terminal-title small{display:none}}
 `;
@@ -68,15 +72,29 @@ export function ControlRoomPage({ context }: PluginPageProps) {
   const data = fetchedData ?? (lastData?.company.id === companyId ? lastData : null);
   const invokeCeo = usePluginAction("invoke-ceo");
   const askCeo = usePluginAction("ask-ceo");
-  const [busy, setBusy] = useState<"run" | "chat" | null>(null);
+  const setupCompany = usePluginAction("setup-company");
+  const saveCompanyIntegrations = usePluginAction("save-company-integrations");
+  const [busy, setBusy] = useState<"run" | "chat" | "setup" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [settingsCompanyId, setSettingsCompanyId] = useState("");
+  const [websiteUrl, setWebsiteUrl] = useState("");
+  const [vercelProjectId, setVercelProjectId] = useState("");
+  const [vercelTeamId, setVercelTeamId] = useState("");
 
   useEffect(() => {
     if (fetchedData) setLastData(fetchedData);
   }, [fetchedData]);
+
+  useEffect(() => {
+    if (!data || settingsCompanyId === data.company.id) return;
+    setWebsiteUrl(data.integrationSettings.websiteUrl);
+    setVercelProjectId(data.integrationSettings.vercelProjectId);
+    setVercelTeamId(data.integrationSettings.vercelTeamId);
+    setSettingsCompanyId(data.company.id);
+  }, [data, settingsCompanyId]);
 
   useEffect(() => {
     let active = true;
@@ -128,19 +146,26 @@ export function ControlRoomPage({ context }: PluginPageProps) {
     setBusy("chat"); setActionError(null);
     try { await askCeo({ companyId, prompt: value }); setPrompt(""); await refresh(); } catch (err) { setActionError(err instanceof Error ? err.message : String(err)); } finally { setBusy(null); }
   }
+  async function setup() {
+    setBusy("setup"); setActionError(null);
+    try { await setupCompany({ companyId }); await refresh(); } catch (err) { setActionError(err instanceof Error ? err.message : String(err)); } finally { setBusy(null); }
+  }
+  async function saveIntegrations() {
+    setBusy("setup"); setActionError(null);
+    try { await saveCompanyIntegrations({ companyId, websiteUrl, vercelProjectId, vercelTeamId }); await refresh(); } catch (err) { setActionError(err instanceof Error ? err.message : String(err)); } finally { setBusy(null); }
+  }
 
   if (loading && !data) return <><style>{css}</style><main className="fc-loading">Loading live company state…</main></>;
   if (!data) return <><style>{css}</style><main className="fc-loading fc-error">Foundry could not load live data: {error?.message ?? "No company data returned"}</main></>;
   const spentRatio = data.company.budgetMonthlyCents > 0 ? Math.min(100, (data.company.spentMonthlyCents / data.company.budgetMonthlyCents) * 100) : 0;
   const activeGoal = data.goals.find((goal) => goal.status === "active");
-  const settingsPath = "/company/settings/instance/plugins";
 
   return <><style>{css}</style><main className="fc">
     <header className="fc-top"><span className="fc-brand">Foundry</span><span className="fc-company">{data.company.name}</span><span className="fc-handle">{data.company.issuePrefix}</span><span className="fc-status">{data.company.status}</span><span className="fc-updated"><span className={`fc-sync-dot ${syncError ? "off" : ""}`}/>{syncError ? "SYNC ISSUE" : syncing ? "SYNCING" : "LIVE · 5S SYNC"}<small>{when(data.generatedAt)}</small></span></header>
     <div className="fc-layout">
       <div className="fc-col">
         <section className="fc-terminal"><div className="fc-terminal-title"><span>Live operations</span><small>all agents · run events · audit trail</small></div><div className="fc-runbar"><span className="fc-dot"/> {data.counts.activeRuns > 0 ? `${data.counts.activeRuns} running` : "System idle"}<span>{data.agents.length} agents</span><span>{data.counts.activeIssues} active tasks</span><span>{money(data.company.spentMonthlyCents)} spent</span></div>{activityRows.length === 0 ? <Empty>No runs or audit events recorded yet.</Empty> : activityRows.map((row) => <div key={row.id}><div className="fc-log"><time>{time(row.at)}</time><b className={row.bad ? "bad" : ""}>{row.label}</b><span>{row.actor} — {row.text}</span></div>{row.excerpt && <pre className="fc-pre">{row.excerpt}</pre>}</div>)}</section>
-        <Panel title="Command center"><div className="fc-buttons"><button className="run" onClick={() => void runCeo()} disabled={!data.ceo || busy !== null}>{busy === "run" ? "Starting…" : "Run CEO"}</button><a className="fc-btn" {...navigation.linkProps("/agents")}>Agents</a><a className="fc-btn" {...navigation.linkProps("/issues")}>Tasks</a><button onClick={() => void refresh()} disabled={syncing}>{syncing ? "Syncing…" : "Sync now"}</button></div>{!data.ceo && <p className="fc-error">No CEO agent is configured.</p>}{(actionError || syncError) && <p className="fc-error">{actionError ?? syncError}</p>}</Panel>
+        <Panel title="Command center"><div className="fc-buttons"><button className="run" onClick={() => void runCeo()} disabled={!data.ceo || busy !== null}>{busy === "run" ? "Starting…" : "Run CEO"}</button><button className="primary" onClick={() => void setup()} disabled={busy !== null}>{busy === "setup" ? "Installing…" : "Install company system"}</button><a className="fc-btn" {...navigation.linkProps("/agents")}>Agents</a><a className="fc-btn" {...navigation.linkProps("/issues")}>Tasks</a><button onClick={() => void refresh()} disabled={syncing}>{syncing ? "Syncing…" : "Sync now"}</button></div>{!data.ceo && <p className="fc-error">No CEO agent is configured.</p>}{(actionError || syncError) && <p className="fc-error">{actionError ?? syncError}</p>}</Panel>
         <Panel title="Engine"><div className="fc-kicker">Current execution</div><div className="fc-big">{data.counts.activeRuns}</div><div className="fc-muted">active or queued runs</div><hr className="fc-rule"/><div className="fc-row"><span>OpenCode agents</span><strong>{data.counts.connectedOpenCodeAgents}</strong></div><div className="fc-row"><span>Recent failed runs</span><strong className={data.counts.failedRuns ? "fc-error" : ""}>{data.counts.failedRuns}</strong></div><div className="fc-row"><span>Last CEO heartbeat</span><strong>{when(data.ceo?.lastHeartbeatAt)}</strong></div></Panel>
         <Panel title="Tasks"><div className="fc-buttons"><a className="fc-btn" {...navigation.linkProps("/issues")}>+ New task</a></div><hr className="fc-rule"/>{data.issues.slice(0, 8).map((issue) => <div className="fc-row" key={issue.id}><span><strong>{issue.identifier ?? "TASK"}</strong><br/>{issue.title}</span><span className="fc-tag">{issue.status.replaceAll("_", " ")}</span></div>)}{data.issues.length === 0 && <Empty>No tasks exist.</Empty>}<p className="fc-muted">{data.counts.completedIssues} finished · {data.counts.activeIssues} active</p></Panel>
         <Panel title="Company spend"><div className="fc-kicker">Paperclip spend this month</div><div className="fc-money">{money(data.company.spentMonthlyCents)}</div><div className="fc-meter"><span style={{ width: `${spentRatio}%` }}/></div><p>{data.company.budgetMonthlyCents > 0 ? `${money(data.company.budgetMonthlyCents)} monthly budget` : "No monthly budget configured"}</p><p className="fc-note">This is actual agent spend, not customer revenue. Revenue is not shown until a payment data source is connected.</p></Panel>
@@ -148,10 +173,11 @@ export function ControlRoomPage({ context }: PluginPageProps) {
       </div>
       <div className="fc-col">
         <Panel title="Agent connections">{data.agents.map((agent) => <div className="fc-row" key={agent.id}><span><span className={`fc-dot ${agent.status === "paused" || agent.status === "error" ? "off" : ""}`}/><strong>{agent.name}</strong><br/><span className="fc-muted">{agent.adapterType} · {agent.role}</span></span><span className="fc-tag">{agent.status}</span></div>)}{data.agents.length === 0 && <Empty>No agents configured.</Empty>}<p className="fc-note">“Connected” means configured in Paperclip. MCP availability is proven per run in activity/tool audit, not inferred from this card.</p></Panel>
-        <Panel title="Integrations">{Object.entries(data.integrations).map(([name, status]) => <div className="fc-row" key={name}><span><span className={`fc-dot ${status.configured ? "" : "off"}`}/>{name}</span><strong>{status.configured ? "Configured" : "Not configured"}</strong></div>)}<a className="fc-btn" {...navigation.linkProps(settingsPath)}>Plugin settings</a></Panel>
+        <Panel title="Connections & tools">{Object.entries(data.integrations).map(([name, status]) => <div className="fc-row" key={name}><span><span className={`fc-dot ${status.configured ? "" : "off"}`}/>{name}</span><strong>{status.configured ? "Configured" : "Not configured"}</strong></div>)}<div className="fc-fields"><div className="fc-field"><label>Production website</label><input value={websiteUrl} onChange={(event) => setWebsiteUrl(event.target.value)} placeholder="https://product.example"/></div><div className="fc-field"><label>Vercel project ID</label><input value={vercelProjectId} onChange={(event) => setVercelProjectId(event.target.value)} placeholder="prj_…"/></div><div className="fc-field"><label>Vercel team ID (optional)</label><input value={vercelTeamId} onChange={(event) => setVercelTeamId(event.target.value)} placeholder="team_…"/></div></div><div className="fc-buttons"><button className="primary" onClick={() => void saveIntegrations()} disabled={busy !== null}>Save company settings</button><a className="fc-btn" {...navigation.linkProps("/apps")}>Secret connections</a><a className="fc-btn" {...navigation.linkProps("/apps/advanced/audit")}>Access & audit</a></div><p className="fc-note">Statuses come from company-bound settings and secret references. Agent access is enforced by Paperclip grants, profiles, and policies.</p></Panel>
+        <Panel title="Governed tool activity">{data.toolEvents.slice(0, 12).map((event) => <div className="fc-row" key={event.id}><span><strong>{event.toolName}</strong><br/><span className={event.status === "failed" ? "fc-error" : "fc-muted"}>{event.error ?? event.summary ?? "In progress"}</span></span><span><span className="fc-tag">{event.status}</span><br/><time>{when(event.updatedAt)}</time></span></div>)}{data.toolEvents.length === 0 && <Empty>No Foundry tool has been invoked through an agent run yet.</Empty>}</Panel>
         <Panel title="Website">{data.integrations.website.configured && data.integrations.website.url ? <><div className="fc-site"><span className="fc-dot"/><a href={data.integrations.website.url} target="_blank" rel="noopener noreferrer">{data.integrations.website.url}</a></div><div className="fc-site-frame"><iframe title="Production website preview" src={data.integrations.website.url}/></div></> : <Empty>No production URL configured. Add the real URL in Foundry plugin settings after deployment.</Empty>}</Panel>
         <Panel title="Analytics"><Empty>No analytics source is connected. Foundry will not invent pageviews, visitors, or sessions.</Empty></Panel>
-        <Panel title="Documents">{data.documents.slice(0, 12).map((document) => <div className="fc-row" key={document.id}><span><strong>{document.title ?? document.key}</strong><br/><span className="fc-muted">{document.issueIdentifier ?? document.issueTitle}</span></span><time>{when(document.updatedAt)}</time></div>)}{data.documents.length === 0 && <Empty>No issue documents exist.</Empty>}</Panel>
+        <Panel title="Documents">{data.documents.slice(0, 12).map((document) => <a className="fc-row" key={document.id} {...navigation.linkProps(`/issues/${document.issueIdentifier ?? document.issueId}#document-${encodeURIComponent(document.key)}`)}><span><strong>{document.title ?? document.key}</strong><br/><span className="fc-muted">{document.issueIdentifier ?? document.issueTitle}</span></span><time>{when(document.updatedAt)}</time></a>)}{data.documents.length === 0 && <Empty>No issue documents exist.</Empty>}</Panel>
         <Panel title="Project workspaces">{data.workspaces.map((workspace) => <div className="fc-card" key={workspace.id}><strong>{workspace.projectName} / {workspace.name}</strong><p className="fc-muted">{workspace.repoUrl ?? workspace.path}</p><span className="fc-tag">{workspace.isPrimary ? "primary" : "workspace"}</span></div>)}{data.workspaces.length === 0 && <Empty>No project workspaces configured. Agents cannot reliably build without one.</Empty>}</Panel>
       </div>
       <aside className="fc-col fc-side">

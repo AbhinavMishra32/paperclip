@@ -5,7 +5,23 @@ import {
   type PluginContext,
   type ToolResult,
 } from "@paperclipai/plugin-sdk";
+import { execFile } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { TOOL_NAMES } from "./manifest.js";
+
+const execFileAsync = promisify(execFile);
+const LAGUNA_MODEL = "poolside/laguna-xs-2.1:free";
+const namespacedTool = (name: string) => `foundry.control-room:${name}`;
+
+const ROLE_TOOL_NAMES: Record<string, string[]> = {
+  ceo: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments],
+  "engineering-manager": [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deployProject],
+  cto: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.provisionAppEnvironment, TOOL_NAMES.listDeployments, TOOL_NAMES.deployProject],
+  qa: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.checkOpenRouter, TOOL_NAMES.listDeployments],
+  growth: [TOOL_NAMES.companyContext, TOOL_NAMES.integrationStatus, TOOL_NAMES.listDeployments, TOOL_NAMES.publishBlog],
+};
 
 type FoundryConfig = {
   websiteUrl?: string;
@@ -13,7 +29,12 @@ type FoundryConfig = {
   vercelToken?: string | EnvSecretRefBinding;
   vercelProjectId?: string;
   vercelTeamId?: string;
+  openrouterApiKey?: string | EnvSecretRefBinding;
+  databaseUrl?: string | EnvSecretRefBinding;
+  authSecret?: string | EnvSecretRefBinding;
 };
+
+type ToolEvent = { id: string; agentId: string | null; runId: string | null; toolName: string; status: string; summary: string | null; error: string | null; metadata: Record<string, unknown>; createdAt: string; updatedAt: string };
 
 type FounderCeoMessage = {
   id: string;
@@ -32,6 +53,43 @@ type ChatRun = { id: string; status: string; summary: string | null; error: stri
 
 function chatTable(ctx: PluginContext) {
   return `${ctx.db.namespace}.founder_ceo_messages`;
+}
+
+function toolEventTable(ctx: PluginContext) {
+  return `${ctx.db.namespace}.tool_events`;
+}
+
+async function listToolEvents(ctx: PluginContext, companyId: string): Promise<ToolEvent[]> {
+  return await ctx.db.query<ToolEvent>(
+    `SELECT id, agent_id AS "agentId", run_id AS "runId", tool_name AS "toolName", status,
+            summary, error, metadata, created_at::text AS "createdAt", updated_at::text AS "updatedAt"
+       FROM ${toolEventTable(ctx)} WHERE company_id = $1 ORDER BY created_at DESC LIMIT 100`,
+    [companyId],
+  );
+}
+
+async function beginToolEvent(ctx: PluginContext, runCtx: { companyId: string; agentId: string; runId: string }, toolName: string) {
+  const id = crypto.randomUUID();
+  await ctx.db.execute(
+    `INSERT INTO ${toolEventTable(ctx)} (id, company_id, agent_id, run_id, tool_name, status) VALUES ($1,$2,$3,$4,$5,'running')`,
+    [id, runCtx.companyId, runCtx.agentId, runCtx.runId, toolName],
+  );
+  return id;
+}
+
+async function finishToolEvent(ctx: PluginContext, id: string, result: ToolResult, metadata: Record<string, unknown> = {}) {
+  const failed = Boolean(result.error);
+  await ctx.db.execute(
+    `UPDATE ${toolEventTable(ctx)} SET status=$1, summary=$2, error=$3, metadata=$4::jsonb, updated_at=now() WHERE id=$5`,
+    [failed ? "failed" : "succeeded", failed ? null : chatText(result.content, 2_000), failed ? chatText(result.error, 2_000) : null, JSON.stringify(metadata), id],
+  );
+  return result;
+}
+
+async function failToolEvent(ctx: PluginContext, id: string, error: unknown) {
+  const message = chatText(error instanceof Error ? error.message : String(error), 2_000);
+  await ctx.db.execute(`UPDATE ${toolEventTable(ctx)} SET status='failed', error=$1, updated_at=now() WHERE id=$2`, [message, id]);
+  return { error: message } satisfies ToolResult;
 }
 
 function chatText(value: string | null | undefined, maxLength = 8_000) {
@@ -137,7 +195,34 @@ function isSecretRef(value: unknown): value is EnvSecretRefBinding {
 }
 
 async function getConfig(ctx: PluginContext, companyId: string): Promise<FoundryConfig> {
-  return await ctx.config.get(companyId) as FoundryConfig;
+  const global = await ctx.config.get(companyId) as FoundryConfig;
+  const rows = await ctx.db.query<{ websiteUrl: string | null; vercelProjectId: string | null; vercelTeamId: string | null }>(
+    `SELECT website_url AS "websiteUrl", vercel_project_id AS "vercelProjectId", vercel_team_id AS "vercelTeamId"
+       FROM ${ctx.db.namespace}.company_integrations WHERE company_id = $1 LIMIT 1`,
+    [companyId],
+  );
+  const local = rows[0];
+  return {
+    ...global,
+    websiteUrl: local?.websiteUrl || global.websiteUrl,
+    vercelProjectId: local?.vercelProjectId || global.vercelProjectId,
+    vercelTeamId: local?.vercelTeamId || global.vercelTeamId,
+  };
+}
+
+function optionalUrl(value: unknown) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return null;
+  const url = new URL(text);
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Website URL must use http or https");
+  return url.toString();
+}
+
+function optionalId(value: unknown, label: string) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return null;
+  if (!/^[A-Za-z0-9_.-]{1,200}$/.test(text)) throw new Error(`${label} contains unsupported characters`);
+  return text;
 }
 
 function integrationStatus(config: FoundryConfig) {
@@ -150,11 +235,14 @@ function integrationStatus(config: FoundryConfig) {
     },
     analytics: { configured: false },
     email: { configured: false },
+    openrouter: { configured: isSecretRef(config.openrouterApiKey), model: LAGUNA_MODEL },
+    database: { configured: isSecretRef(config.databaseUrl) },
+    auth: { configured: isSecretRef(config.authSecret) },
   };
 }
 
 async function companySnapshot(ctx: PluginContext, companyId: string) {
-  const [company, agents, issues, projects, goals, activity, runs, runEvents, config] = await Promise.all([
+  const [company, agents, issues, projects, goals, activity, runs, runEvents, config, toolEvents] = await Promise.all([
     ctx.companies.get(companyId),
     ctx.agents.list({ companyId, limit: 200, offset: 0 }),
     ctx.issues.list({ companyId, limit: 200, offset: 0 }),
@@ -164,6 +252,7 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
     ctx.activity.listRuns({ companyId, limit: 80 }),
     ctx.activity.listRunEvents({ companyId, limit: 250 }),
     getConfig(ctx, companyId),
+    listToolEvents(ctx, companyId),
   ]);
   if (!company) throw new Error("Company not found");
 
@@ -220,9 +309,15 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
     runs,
     runEvents,
     chatMessages,
+    toolEvents,
     workspaces,
     documents: documentCounts.flatMap((entry) => entry.documents.map((document) => ({ ...document, issueId: entry.issueId, issueIdentifier: entry.issueIdentifier, issueTitle: entry.issueTitle }))),
     integrations: integrationStatus(config),
+    integrationSettings: {
+      websiteUrl: config.websiteUrl ?? "",
+      vercelProjectId: config.vercelProjectId ?? "",
+      vercelTeamId: config.vercelTeamId ?? "",
+    },
     counts: {
       activeIssues: activeIssues.length,
       completedIssues: completedIssues.length,
@@ -232,6 +327,103 @@ async function companySnapshot(ctx: PluginContext, companyId: string) {
     },
     honestRead,
   };
+}
+
+async function resolveWorkspace(ctx: PluginContext, runCtx: { companyId: string; projectId?: string | null }) {
+  const projects = await ctx.projects.list({ companyId: runCtx.companyId, limit: 200, offset: 0 });
+  const ordered = runCtx.projectId
+    ? [...projects.filter((project) => project.id === runCtx.projectId), ...projects.filter((project) => project.id !== runCtx.projectId)]
+    : projects;
+  for (const project of ordered) {
+    const workspaces = await ctx.projects.listWorkspaces(project.id, runCtx.companyId);
+    const workspace = workspaces.find((entry) => entry.isPrimary) ?? workspaces[0];
+    if (workspace?.path) return { project, workspace };
+  }
+  throw new Error("No project workspace is configured for this company");
+}
+
+async function git(workspacePath: string, args: string[]) {
+  const result = await execFileAsync("git", args, { cwd: workspacePath, timeout: 120_000, maxBuffer: 2_000_000 });
+  return result.stdout.trim();
+}
+
+function vercelQuery(config: FoundryConfig, additions: Record<string, string> = {}) {
+  const query = new URLSearchParams({ projectId: config.vercelProjectId ?? "", limit: "10", ...additions });
+  if (config.vercelTeamId) query.set("teamId", config.vercelTeamId);
+  return query;
+}
+
+async function vercelDeployments(ctx: PluginContext, companyId: string, config: FoundryConfig, limit = 10) {
+  if (!isSecretRef(config.vercelToken) || !config.vercelProjectId) throw new Error("Vercel token and project ID are not configured");
+  const token = await ctx.secrets.resolve(config.vercelToken, { companyId, configPath: "vercelToken" });
+  const query = vercelQuery(config, { limit: String(Math.max(1, Math.min(20, limit))) });
+  const response = await ctx.http.fetch(`https://api.vercel.com/v6/deployments?${query}`, { headers: { Authorization: `Bearer ${token}` } });
+  const body = await response.json() as { deployments?: Array<Record<string, unknown>>; error?: { message?: string } };
+  if (!response.ok) throw new Error(body.error?.message ?? `Vercel request failed with HTTP ${response.status}`);
+  return (body.deployments ?? []).map((deployment) => ({
+    id: deployment.uid ?? deployment.id,
+    name: deployment.name,
+    url: typeof deployment.url === "string" ? `https://${deployment.url}` : null,
+    state: deployment.state ?? deployment.readyState,
+    target: deployment.target,
+    createdAt: deployment.createdAt ?? deployment.created,
+    meta: deployment.meta ?? {},
+  }));
+}
+
+async function matchingDeployment(ctx: PluginContext, companyId: string, config: FoundryConfig, sha: string) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const deployments = await vercelDeployments(ctx, companyId, config, 20);
+    const match = deployments.find((deployment) => {
+      const meta = deployment.meta as Record<string, unknown>;
+      return meta.githubCommitSha === sha || meta.gitCommitSha === sha || meta.commitSha === sha;
+    });
+    if (match) return match;
+    if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  return null;
+}
+
+async function provisionVercelEnv(ctx: PluginContext, companyId: string, config: FoundryConfig, key: string, ref: EnvSecretRefBinding, target: string[]) {
+  if (!isSecretRef(config.vercelToken) || !config.vercelProjectId) throw new Error("Vercel token and project ID are not configured");
+  const [value, token] = await Promise.all([
+    ctx.secrets.resolve(ref, { companyId, configPath: key }),
+    ctx.secrets.resolve(config.vercelToken, { companyId, configPath: "vercelToken" }),
+  ]);
+  const query = new URLSearchParams({ upsert: "true" });
+  if (config.vercelTeamId) query.set("teamId", config.vercelTeamId);
+  const response = await ctx.http.fetch(`https://api.vercel.com/v10/projects/${encodeURIComponent(config.vercelProjectId)}/env?${query}`, {
+    method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ key, value, type: "sensitive", target }),
+  });
+  const body = await response.json() as { error?: { message?: string } };
+  if (!response.ok) throw new Error(body.error?.message ?? `Vercel environment request failed with HTTP ${response.status}`);
+}
+
+async function applyRoleToolGrants(ctx: PluginContext, companyId: string) {
+  const agents = await ctx.agents.list({ companyId, limit: 200, offset: 0 });
+  const applied: Array<{ agentId: string; agentName: string; tools: string[] }> = [];
+  for (const agent of agents) {
+    const toolNames = ROLE_TOOL_NAMES[agent.role] ?? (agent.name.trim().toLowerCase() === "cto" ? ROLE_TOOL_NAMES.cto : []);
+    if (!toolNames?.length) continue;
+    const existing = await ctx.authorization.grants.list({ companyId, principalType: "agent", principalId: agent.id });
+    const otherGrants = existing
+      .filter((grant) => grant.permissionKey !== "tools:use")
+      .map((grant) => ({ permissionKey: grant.permissionKey, scope: grant.scope }));
+    const previousToolGrant = existing.find((grant) => grant.permissionKey === "tools:use");
+    const previousAllow = previousToolGrant?.scope && Array.isArray(previousToolGrant.scope.allow)
+      ? previousToolGrant.scope.allow.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const allow = [...new Set([...previousAllow, ...toolNames.map(namespacedTool)])];
+    await ctx.authorization.grants.set({
+      companyId,
+      principalType: "agent",
+      principalId: agent.id,
+      grants: [...otherGrants, { permissionKey: "tools:use", scope: { allow } }],
+    });
+    applied.push({ agentId: agent.id, agentName: agent.name, tools: allow });
+  }
+  return applied;
 }
 
 async function stripeRequest(ctx: PluginContext, secret: string, path: string, body: URLSearchParams) {
@@ -335,6 +527,125 @@ function registerTools(ctx: PluginContext) {
     await ctx.activity.log({ companyId: runCtx.companyId, message: "Provisioned STRIPE_SECRET_KEY to Vercel", entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, projectId: config.vercelProjectId, target } });
     return { content: `Provisioned STRIPE_SECRET_KEY to ${target.join(", ")}.`, data: { projectId: config.vercelProjectId, target } };
   });
+
+  ctx.tools.register(TOOL_NAMES.checkOpenRouter, {
+    displayName: "Check OpenRouter connection",
+    description: "Verify the configured OpenRouter credential and Laguna model.",
+    parametersSchema: { type: "object", properties: {} },
+  }, async (_raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.checkOpenRouter);
+    try {
+      const config = await getConfig(ctx, runCtx.companyId);
+      if (!isSecretRef(config.openrouterApiKey)) return await finishToolEvent(ctx, eventId, { error: "OpenRouter is not configured" });
+      const secret = await ctx.secrets.resolve(config.openrouterApiKey, { companyId: runCtx.companyId, configPath: "openrouterApiKey" });
+      const response = await ctx.http.fetch("https://openrouter.ai/api/v1/models", { headers: { Authorization: `Bearer ${secret}` } });
+      const body = await response.json() as { data?: Array<{ id?: string }>; error?: { message?: string } };
+      if (!response.ok) return await finishToolEvent(ctx, eventId, { error: body.error?.message ?? `OpenRouter returned HTTP ${response.status}` });
+      const available = Boolean(body.data?.some((model) => model.id === LAGUNA_MODEL));
+      const result: ToolResult = available
+        ? { content: `OpenRouter is connected and ${LAGUNA_MODEL} is available.`, data: { connected: true, model: LAGUNA_MODEL, available: true } }
+        : { error: `OpenRouter connected, but ${LAGUNA_MODEL} was not present in the model catalog.` };
+      return await finishToolEvent(ctx, eventId, result, { model: LAGUNA_MODEL });
+    } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
+
+  ctx.tools.register(TOOL_NAMES.provisionAppEnvironment, {
+    displayName: "Provision application environment",
+    description: "Provision approved company secrets into the configured Vercel project.",
+    parametersSchema: { type: "object", properties: { variables: { type: "array", items: { type: "string" } }, target: { type: "array", items: { type: "string" } } }, required: ["variables", "target"] },
+  }, async (raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.provisionAppEnvironment);
+    try {
+      const input = raw as { variables?: unknown; target?: unknown };
+      const allowedTargets = new Set(["production", "preview", "development"]);
+      const target = Array.isArray(input.target) ? input.target.filter((entry): entry is string => typeof entry === "string" && allowedTargets.has(entry)) : [];
+      const variables = Array.isArray(input.variables) ? [...new Set(input.variables.filter((entry): entry is string => typeof entry === "string"))] : [];
+      if (target.length === 0 || variables.length === 0) return await finishToolEvent(ctx, eventId, { error: "At least one approved variable and target are required" });
+      const config = await getConfig(ctx, runCtx.companyId);
+      const refs: Record<string, EnvSecretRefBinding | undefined> = {
+        OPENROUTER_API_KEY: isSecretRef(config.openrouterApiKey) ? config.openrouterApiKey : undefined,
+        DATABASE_URL: isSecretRef(config.databaseUrl) ? config.databaseUrl : undefined,
+        AUTH_SECRET: isSecretRef(config.authSecret) ? config.authSecret : undefined,
+        STRIPE_SECRET_KEY: isSecretRef(config.stripeSecretKey) ? config.stripeSecretKey : undefined,
+      };
+      const invalid = variables.filter((key) => !Object.hasOwn(refs, key));
+      const missing = variables.filter((key) => !refs[key]);
+      if (invalid.length > 0) return await finishToolEvent(ctx, eventId, { error: `Unsupported variables: ${invalid.join(", ")}` });
+      if (missing.length > 0) return await finishToolEvent(ctx, eventId, { error: `Company secrets are not configured for: ${missing.join(", ")}` });
+      for (const key of variables) await provisionVercelEnv(ctx, runCtx.companyId, config, key, refs[key]!, target);
+      await ctx.activity.log({ companyId: runCtx.companyId, message: `Provisioned ${variables.join(", ")} to Vercel`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, variables, target, projectId: config.vercelProjectId } });
+      return await finishToolEvent(ctx, eventId, { content: `Provisioned ${variables.join(", ")} to ${target.join(", ")}.`, data: { variables, target, projectId: config.vercelProjectId } }, { variables, target, projectId: config.vercelProjectId });
+    } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
+
+  ctx.tools.register(TOOL_NAMES.listDeployments, {
+    displayName: "Get Vercel deployments",
+    description: "Read real deployments from the configured Vercel project.",
+    parametersSchema: { type: "object", properties: { limit: { type: "integer" } } },
+  }, async (raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.listDeployments);
+    try {
+      const config = await getConfig(ctx, runCtx.companyId);
+      const deployments = await vercelDeployments(ctx, runCtx.companyId, config, Number((raw as { limit?: number }).limit ?? 10));
+      return await finishToolEvent(ctx, eventId, { content: `Found ${deployments.length} real Vercel deployments.`, data: { deployments } }, { count: deployments.length });
+    } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
+
+  ctx.tools.register(TOOL_NAMES.deployProject, {
+    displayName: "Deploy project",
+    description: "Push the committed project workspace and observe the matching Vercel deployment.",
+    parametersSchema: { type: "object", properties: {} },
+  }, async (_raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.deployProject);
+    try {
+      const config = await getConfig(ctx, runCtx.companyId);
+      const { workspace } = await resolveWorkspace(ctx, runCtx);
+      const dirty = await git(workspace.path, ["status", "--porcelain"]);
+      if (dirty) return await finishToolEvent(ctx, eventId, { error: "Deployment refused: the project workspace has uncommitted changes." });
+      const sha = await git(workspace.path, ["rev-parse", "HEAD"]);
+      const branch = await git(workspace.path, ["rev-parse", "--abbrev-ref", "HEAD"]);
+      await git(workspace.path, ["push", "origin", `HEAD:${branch}`]);
+      const deployment = await matchingDeployment(ctx, runCtx.companyId, config, sha);
+      await ctx.activity.log({ companyId: runCtx.companyId, message: `Pushed ${sha.slice(0, 12)} for Vercel deployment`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, sha, branch, deployment } });
+      const result: ToolResult = deployment
+        ? { content: `Pushed ${sha}. Vercel deployment ${String(deployment.id)} is ${String(deployment.state)} at ${String(deployment.url ?? "URL pending")}.`, data: { sha, branch, deployment } }
+        : { content: `Pushed ${sha}. Vercel has not exposed the matching deployment yet; call get_vercel_deployments to follow it.`, data: { sha, branch, deployment: null } };
+      return await finishToolEvent(ctx, eventId, result, { sha, branch, deployment });
+    } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
+
+  ctx.tools.register(TOOL_NAMES.publishBlog, {
+    displayName: "Publish blog article",
+    description: "Write, commit, push, and observe a Markdown article using the existing blog contract.",
+    parametersSchema: { type: "object", properties: { title: { type: "string" }, slug: { type: "string" }, excerpt: { type: "string" }, contentMarkdown: { type: "string" } }, required: ["title", "slug", "excerpt", "contentMarkdown"] },
+  }, async (raw, runCtx): Promise<ToolResult> => {
+    const eventId = await beginToolEvent(ctx, runCtx, TOOL_NAMES.publishBlog);
+    try {
+      const input = raw as { title?: string; slug?: string; excerpt?: string; contentMarkdown?: string };
+      const title = input.title?.trim() ?? ""; const slug = input.slug?.trim() ?? ""; const excerpt = input.excerpt?.trim() ?? ""; const content = input.contentMarkdown?.trim() ?? "";
+      if (title.length < 5 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || excerpt.length < 20 || content.length < 200) {
+        return await finishToolEvent(ctx, eventId, { error: "title, valid kebab-case slug, excerpt (20+ chars), and contentMarkdown (200+ chars) are required" });
+      }
+      const config = await getConfig(ctx, runCtx.companyId);
+      const { workspace } = await resolveWorkspace(ctx, runCtx);
+      const dirty = await git(workspace.path, ["status", "--porcelain"]);
+      if (dirty) return await finishToolEvent(ctx, eventId, { error: "Publication refused: commit or discard existing workspace changes first." });
+      const blogDir = join(workspace.path, "content", "blog");
+      await mkdir(blogDir, { recursive: true });
+      const filePath = join(blogDir, `${slug}.md`);
+      const yaml = (value: string) => JSON.stringify(value);
+      const body = `---\ntitle: ${yaml(title)}\nslug: ${yaml(slug)}\nexcerpt: ${yaml(excerpt)}\npublishedAt: ${yaml(new Date().toISOString())}\nauthor: ${yaml("Editorial Team")}\n---\n\n${content}\n`;
+      await writeFile(filePath, body, { encoding: "utf8", flag: "wx" });
+      await git(workspace.path, ["add", `content/blog/${slug}.md`]);
+      await git(workspace.path, ["-c", "user.name=Foundry", "-c", "user.email=foundry@local", "commit", "-m", `content: publish ${slug}`]);
+      const sha = await git(workspace.path, ["rev-parse", "HEAD"]);
+      const branch = await git(workspace.path, ["rev-parse", "--abbrev-ref", "HEAD"]);
+      await git(workspace.path, ["push", "origin", `HEAD:${branch}`]);
+      const deployment = await matchingDeployment(ctx, runCtx.companyId, config, sha);
+      await ctx.activity.log({ companyId: runCtx.companyId, message: `Published blog article ${title}`, entityType: "agent", entityId: runCtx.agentId, metadata: { runId: runCtx.runId, slug, filePath: `content/blog/${slug}.md`, sha, deployment } });
+      return await finishToolEvent(ctx, eventId, { content: `Published ${title} in content/blog/${slug}.md at commit ${sha}.${deployment ? ` Deployment ${String(deployment.id)} is ${String(deployment.state)}.` : " Deployment discovery is pending."}`, data: { title, slug, filePath: `content/blog/${slug}.md`, sha, branch, deployment } }, { title, slug, sha, branch, deployment });
+    } catch (error) { return await failToolEvent(ctx, eventId, error); }
+  });
 }
 
 const plugin = definePlugin({
@@ -352,6 +663,38 @@ const plugin = definePlugin({
         prompt: "Review the current company state, choose the highest-impact in-scope next action, and execute or delegate it. Use available Foundry MCP tools where relevant. Report evidence, never invented data.",
       });
       return { ...result, agentId: ceo.id };
+    });
+
+    ctx.actions.register("setup-company", async (params) => {
+      const companyId = companyIdFrom(params);
+      const project = await ctx.projects.managed.reconcile("company-operations", companyId);
+      const agent = await ctx.agents.managed.reconcile("growth-operator", companyId);
+      const skills = [];
+      for (const key of ["ai-feature-integration", "database-auth", "payments", "blog-publishing", "product-design", "deployment", "qa-recovery"]) {
+        skills.push(await ctx.skills.managed.reconcile(key, companyId));
+      }
+      const routines = [];
+      routines.push(await ctx.routines.managed.reconcile("weekly-evidence-review", companyId));
+      routines.push(await ctx.routines.managed.reconcile("weekly-blog", companyId));
+      const toolGrants = await applyRoleToolGrants(ctx, companyId);
+      await ctx.activity.log({ companyId, message: "Reconciled Foundry company operating template", entityType: "company", entityId: companyId, metadata: { project: project.status, agent: agent.status, skills: skills.map((entry) => entry.status), routines: routines.map((entry) => entry.status), toolGrantAgents: toolGrants.map((entry) => entry.agentId) } });
+      return { project, agent, skills, routines, toolGrants };
+    });
+
+    ctx.actions.register("save-company-integrations", async (params) => {
+      const companyId = companyIdFrom(params);
+      const websiteUrl = optionalUrl(params.websiteUrl);
+      const vercelProjectId = optionalId(params.vercelProjectId, "Vercel project ID");
+      const vercelTeamId = optionalId(params.vercelTeamId, "Vercel team ID");
+      await ctx.db.execute(
+        `INSERT INTO ${ctx.db.namespace}.company_integrations (company_id, website_url, vercel_project_id, vercel_team_id)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (company_id) DO UPDATE SET website_url=excluded.website_url, vercel_project_id=excluded.vercel_project_id,
+           vercel_team_id=excluded.vercel_team_id, updated_at=now()`,
+        [companyId, websiteUrl, vercelProjectId, vercelTeamId],
+      );
+      await ctx.activity.log({ companyId, message: "Updated company-specific Foundry integration settings", entityType: "company", entityId: companyId, metadata: { websiteConfigured: Boolean(websiteUrl), vercelProjectConfigured: Boolean(vercelProjectId), vercelTeamConfigured: Boolean(vercelTeamId) } });
+      return { websiteUrl, vercelProjectId, vercelTeamId };
     });
 
     ctx.actions.register("ask-ceo", async (params) => {
