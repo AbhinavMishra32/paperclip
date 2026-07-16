@@ -141,6 +141,7 @@ const manifest: PaperclipPluginManifestV1 = {
       model: "opencode-go/deepseek-v4-flash",
       paperclipSkillSync: { desiredSkills: FOUNDRY_SKILL_KEYS },
     },
+    runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
     permissions: { pluginTools: [PLUGIN_ID] },
     status: "idle",
     budgetMonthlyCents: 0,
