@@ -1,4 +1,4 @@
-CREATE TABLE tool_events (
+CREATE TABLE plugin_foundry_control_room_3b1f1b2980.tool_events (
   id uuid PRIMARY KEY,
   company_id uuid NOT NULL,
   agent_id uuid,
@@ -12,9 +12,9 @@ CREATE TABLE tool_events (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX tool_events_company_created_idx ON tool_events (company_id, created_at DESC);
+CREATE INDEX tool_events_company_created_idx ON plugin_foundry_control_room_3b1f1b2980.tool_events (company_id, created_at DESC);
 
-CREATE TABLE company_integrations (
+CREATE TABLE plugin_foundry_control_room_3b1f1b2980.company_integrations (
   company_id uuid PRIMARY KEY,
   website_url text,
   vercel_project_id text,
